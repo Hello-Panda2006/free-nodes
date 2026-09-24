@@ -28,3 +28,16 @@ jobs:
       - name: Merge and deduplicate nodes
         run: |
           python src/merge_nodes.py
+
+      - name: Download Mihomo
+        run: |
+          mkdir -p bin
+
+          curl -L \
+            -o bin/mihomo.gz \
+            https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-compatible-v3.gz
+
+          gunzip -f bin/mihomo.gz
+          chmod +x bin/mihomo
+
+          ./bin/mihomo -v
