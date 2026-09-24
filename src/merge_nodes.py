@@ -10,7 +10,8 @@ Merge and deduplicate free-node sources.
 4. 基础清洗
 5. 根据节点配置生成 fingerprint
 6. 去除重复节点
-7. 输出统计结果
+7. 输出 data/candidates.yaml
+8. 输出统计结果
 
 暂时不：
 - 使用 Mihomo
@@ -35,6 +36,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_FILE = ROOT / "config" / "sources.yaml"
+OUTPUT_FILE = ROOT / "data" / "candidates.yaml"
 
 USER_AGENT = (
     "Mozilla/5.0 "
@@ -188,6 +190,55 @@ def clean_proxy(proxy: Any) -> dict | None:
     return cleaned
 
 
+def save_candidates(nodes: list[dict]) -> None:
+    """Save deduplicated candidate nodes."""
+
+    OUTPUT_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_nodes = []
+
+    for proxy in nodes:
+        # Internal metadata is useful during processing but
+        # should not be passed to Mihomo/OpenClash.
+        output_proxy = {
+            key: value
+            for key, value in proxy.items()
+            if not key.startswith("_")
+        }
+
+        output_nodes.append(output_proxy)
+
+    document = {
+        "proxies": output_nodes,
+    }
+
+    with OUTPUT_FILE.open(
+        "w",
+        encoding="utf-8",
+        newline="\n",
+    ) as f:
+        yaml.safe_dump(
+            document,
+            f,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+
+    print(
+        f"\nCandidate file written: "
+        f"{OUTPUT_FILE.relative_to(ROOT)}"
+    )
+
+    print(
+        f"Candidate nodes written: "
+        f"{len(output_nodes):,}"
+    )
+
+
 def main() -> int:
     print("=" * 70)
     print("free-nodes - merge and deduplicate")
@@ -270,7 +321,10 @@ def main() -> int:
         )
 
     print("-" * 70)
-    print(f"Total valid nodes before deduplication: {len(all_nodes):,}")
+    print(
+        "Total valid nodes before deduplication: "
+        f"{len(all_nodes):,}"
+    )
 
     # ------------------------------------------------------------
     # Deduplicate
@@ -291,8 +345,15 @@ def main() -> int:
 
     nodes = list(unique_nodes.values())
 
-    print(f"Duplicate nodes removed: {duplicate_count:,}")
-    print(f"Unique nodes after deduplication: {len(nodes):,}")
+    print(
+        f"Duplicate nodes removed: "
+        f"{duplicate_count:,}"
+    )
+
+    print(
+        f"Unique nodes after deduplication: "
+        f"{len(nodes):,}"
+    )
 
     # ------------------------------------------------------------
     # Protocol statistics
@@ -311,12 +372,19 @@ def main() -> int:
     ):
         print(f"  {protocol:<16} {count:,}")
 
+    # ------------------------------------------------------------
+    # Save candidates
+    # ------------------------------------------------------------
+
+    save_candidates(nodes)
+
     print("\n" + "=" * 70)
     print("RESULT")
     print("=" * 70)
     print(f"Raw valid nodes:          {len(all_nodes):,}")
     print(f"Duplicates removed:      {duplicate_count:,}")
     print(f"Unique candidate nodes:  {len(nodes):,}")
+    print(f"Output file:              {OUTPUT_FILE.relative_to(ROOT)}")
     print("=" * 70)
 
     return 0
