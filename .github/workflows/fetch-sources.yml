@@ -33,9 +33,9 @@ jobs:
         run: |
           mkdir -p bin
 
-          curl -L \
+          curl -fL \
             -o bin/mihomo.gz \
-            https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-compatible-v3.gz
+            https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64-v3-v1.19.31.gz
 
           gunzip -f bin/mihomo.gz
           chmod +x bin/mihomo
