@@ -1,0 +1,31 @@
+```yaml
+# 免费节点来源
+#
+# 这里只保存“上游订阅地址”。
+# 后续程序会：
+# 1. 下载这些 YAML
+# 2. 提取 proxies
+# 3. 清洗/标准化
+# 4. 去重
+# 5. 使用 Mihomo 验证
+# 6. 进行 YouTube 专项测试
+#
+# 不直接信任上游项目的测速结果。
+
+sources:
+
+  - name: sunmiao
+    url: "https://sunmiao4458.github.io/free-proxy-airport/clash.yaml"
+    format: clash
+    enabled: true
+
+  - name: au1rxx
+    url: "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml"
+    format: clash
+    enabled: true
+
+  - name: thordata
+    url: "https://thordata.github.io/awesome-free-proxy-list/data/clash/all.yaml"
+    format: clash
+    enabled: true
+```
