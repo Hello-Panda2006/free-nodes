@@ -1,0 +1,126 @@
+```yaml
+# ============================================================
+# free-nodes
+# 免费 YouTube 节点筛选器
+# ============================================================
+
+# ---------------- 基本设置 ----------------
+
+# 最终最多保留多少个节点
+max_nodes: 100
+
+# GitHub Actions 单次测试的最大并发节点数
+concurrency: 20
+
+
+# ---------------- 单节点测试 ----------------
+
+test:
+  # 单个节点的硬超时时间
+  timeout_seconds: 3
+
+  # 实际 YouTube 媒体下载目标
+  # 1 MiB = 1024 * 1024 bytes
+  max_download_bytes: 1048576
+
+  # 下载达到目标大小后立即停止
+  stop_when_bytes_reached: true
+
+
+# ---------------- YouTube 测试 ----------------
+
+youtube:
+  enabled: true
+
+  # YouTube 测试视频
+  #
+  # 第一版暂时留空。
+  # 后面确定稳定的视频 ID 后再填写。
+  videos: []
+
+
+# ---------------- 历史数据 ----------------
+
+history:
+  enabled: true
+
+  # 历史数据保存位置
+  file: "data/history.json"
+
+  # 最多保存多少天的测试记录
+  retention_days: 30
+
+
+# ---------------- 晚高峰 ----------------
+
+peak_hours:
+  enabled: true
+
+  # 使用北京时间
+  timezone: "Asia/Shanghai"
+
+  # 北京时间 21:00 开始
+  start: "21:00"
+
+  # 北京时间 01:00 结束
+  end: "01:00"
+
+
+# ---------------- 节点筛选 ----------------
+
+filter:
+  # YouTube 测试必须成功
+  require_youtube_success: true
+
+  # 没有实际媒体数据则淘汰
+  require_media_download: true
+
+  # 是否允许下载速度低于此值的节点进入最终名单
+  #
+  # 第一版暂时不设置硬性最低速度。
+  # 我们先收集真实数据，再根据实际分布决定。
+  minimum_throughput_mbps: 0
+
+  # 是否要求 TTFB 在此时间以内
+  #
+  # 0 表示暂不设置硬性限制。
+  maximum_ttfb_seconds: 0
+
+
+# ---------------- 排名权重 ----------------
+#
+# 这里只定义最终排序的权重。
+# 严重失败的节点会先被淘汰，不会通过加权重新进入候选名单。
+
+ranking:
+  success_rate: 0.40
+  throughput: 0.30
+  ttfb: 0.15
+  peak_performance: 0.15
+
+
+# ---------------- Mihomo ----------------
+
+mihomo:
+  # GitHub Actions 中使用的本地 HTTP 代理端口
+  mixed_port: 7890
+
+  # Mihomo 外部控制 API
+  controller: "127.0.0.1:9090"
+
+  # 测试节点时使用独立的临时配置
+  temporary_config: true
+
+
+# ---------------- Action 调度 ----------------
+
+schedule:
+  # 每 6 小时执行一次
+  interval_hours: 6
+
+  # 第一阶段开发期间不要自动执行。
+  #
+  # 等测试流程全部验证成功后，
+  # 再在 GitHub Actions 中启用 schedule。
+  enabled: false
+```
