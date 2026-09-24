@@ -41,3 +41,7 @@ jobs:
           chmod +x bin/mihomo
 
           ./bin/mihomo -v
+
+      - name: Test one node
+        run: |
+          python src/test_one_node.py
