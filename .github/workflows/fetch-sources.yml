@@ -24,3 +24,7 @@ jobs:
       - name: Fetch and inspect sources
         run: |
           python src/fetch_sources.py
+
+      - name: Merge and deduplicate nodes
+        run: |
+          python src/merge_nodes.py
