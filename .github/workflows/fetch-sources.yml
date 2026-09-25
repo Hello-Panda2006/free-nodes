@@ -65,3 +65,16 @@ jobs:
           path: |
             data/test-results.json
             data/free-nodes.yaml
+
+      - name: Publish free-nodes.yaml
+        run: |
+          cp data/free-nodes.yaml free-nodes.yaml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add free-nodes.yaml
+
+          git diff --cached --quiet || git commit -m "Update free nodes"
+
+          git push            
