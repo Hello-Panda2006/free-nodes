@@ -40,21 +40,14 @@ def write_mihomo_config(node, path, mixed_port, controller_port):
         "mixed-port": mixed_port,
         "external-controller": f"127.0.0.1:{controller_port}",
         "log-level": "error",
-
-        "proxies": [
-            node
-        ],
-
+        "proxies": [node],
         "proxy-groups": [
             {
                 "name": "TEST",
                 "type": "select",
-                "proxies": [
-                    node["name"]
-                ]
+                "proxies": [node["name"]]
             }
         ],
-
         "rules": [
             "MATCH,TEST"
         ]
@@ -78,8 +71,8 @@ def wait_for_mihomo(process, controller_port):
 
         if process.poll() is not None:
             raise RuntimeError(
-                f"Mihomo exited during startup, "
-                f"return code={process.returncode}"
+                f"mihomo_exited_during_startup_"
+                f"return_code_{process.returncode}"
             )
 
         try:
@@ -96,9 +89,7 @@ def wait_for_mihomo(process, controller_port):
 
         time.sleep(0.05)
 
-    raise TimeoutError(
-        "mihomo_startup_timeout"
-    )
+    raise TimeoutError("mihomo_startup_timeout")
 
 
 def test_youtube_page(proxy_port):
@@ -140,7 +131,7 @@ def extract_media_url(proxy_port):
 
     env = os.environ.copy()
 
-    # 明确要求 yt-dlp 通过 Mihomo
+    # 明确让 yt-dlp 通过 Mihomo
     env["HTTP_PROXY"] = proxy
     env["HTTPS_PROXY"] = proxy
     env["http_proxy"] = proxy
@@ -151,45 +142,35 @@ def extract_media_url(proxy_port):
     result = subprocess.run(
         [
             "yt-dlp",
-
             "--no-playlist",
             "--skip-download",
             "-g",
-
             "--no-warnings",
-
             "--proxy",
             proxy,
-
             "--socket-timeout",
             str(STAGE_TIMEOUT),
-
             "-f",
             (
                 "bestvideo[height<=1080][vcodec^=vp9]/"
                 "bestvideo[height<=1080][vcodec^=avc1]/"
                 "bestvideo[height<=1080]"
             ),
-
             TEST_VIDEO_URL
         ],
-
         capture_output=True,
         text=True,
-
         timeout=STAGE_TIMEOUT,
-
         env=env
     )
 
     elapsed = time.perf_counter() - start
 
     if result.returncode != 0:
-
         stderr = result.stderr.strip()
 
         if not stderr:
-            stderr = "unknown yt-dlp error"
+            stderr = "unknown_yt_dlp_error"
 
         raise RuntimeError(
             "yt_dlp_error: " + stderr[-1500:]
@@ -219,17 +200,15 @@ def download_media(media_url, proxy_port):
     downloaded = 0
     first_byte_time = None
 
-    try:
+    response = None
+    error = None
 
+    try:
         response = requests.get(
             media_url,
-
             proxies=proxies,
-
             stream=True,
-
-            timeout=STAGE_TIMEOUT,
-
+            timeout=(STAGE_TIMEOUT, 1.0),
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 "
@@ -243,28 +222,38 @@ def download_media(media_url, proxy_port):
 
         response.raise_for_status()
 
-        for chunk in response.iter_content(
+        iterator = response.iter_content(
             chunk_size=64 * 1024
-        ):
+        )
+
+        while downloaded < MAX_DOWNLOAD_BYTES:
 
             now = time.perf_counter()
 
-            if now - start > STAGE_TIMEOUT:
+            # 3 秒到了：正常结束测试，不算失败
+            if now - start >= STAGE_TIMEOUT:
+                break
 
-                raise TimeoutError(
-                    f"media_timeout_after_{downloaded}_bytes"
-                )
+            try:
+                chunk = next(iterator)
+
+            except requests.exceptions.ChunkedEncodingError as e:
+                error = f"chunked_encoding_error: {e}"
+                break
+
+            except requests.exceptions.ConnectionError as e:
+                error = f"connection_error: {e}"
+                break
 
             if not chunk:
                 continue
+
+            now = time.perf_counter()
 
             if first_byte_time is None:
                 first_byte_time = now
 
             remaining = MAX_DOWNLOAD_BYTES - downloaded
-
-            if remaining <= 0:
-                break
 
             if len(chunk) > remaining:
                 chunk = chunk[:remaining]
@@ -274,46 +263,62 @@ def download_media(media_url, proxy_port):
             if downloaded >= MAX_DOWNLOAD_BYTES:
                 break
 
-        response.close()
+        end = time.perf_counter()
 
-    except requests.exceptions.Timeout:
+    except requests.exceptions.Timeout as e:
+        error = f"timeout: {e}"
+        end = time.perf_counter()
 
-        raise TimeoutError(
-            f"media_timeout_after_{downloaded}_bytes"
-        )
+    except requests.exceptions.RequestException as e:
+        error = f"request_error: {type(e).__name__}: {e}"
+        end = time.perf_counter()
 
     finally:
-
-        try:
-            response.close()
-        except Exception:
-            pass
-
-    end = time.perf_counter()
-
-    if first_byte_time is None:
-
-        raise RuntimeError(
-            "media_no_data"
-        )
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
 
     total_time = end - start
 
-    ttfb = first_byte_time - start
+    if first_byte_time is not None:
+        ttfb = first_byte_time - start
+    else:
+        ttfb = None
 
-    throughput_mbps = (
-        downloaded * 8
-        / total_time
-        / 1_000_000
-        if total_time > 0
-        else 0
-    )
+    if total_time > 0:
+        throughput_mbps = (
+            downloaded * 8
+            / total_time
+            / 1_000_000
+        )
+    else:
+        throughput_mbps = 0
+
+    # 达到 1 MiB：成功完成完整测试
+    if downloaded >= MAX_DOWNLOAD_BYTES:
+        status = "complete"
+
+    # 3 秒时间到了，但已经收到数据
+    elif downloaded > 0 and error is None:
+        status = "time_limit"
+
+    # 中途连接异常
+    elif downloaded > 0 and error is not None:
+        status = "error_after_data"
+
+    # 完全没有收到数据
+    else:
+        status = "error"
 
     return {
+        "status": status,
         "bytes": downloaded,
         "ttfb": ttfb,
         "total_time": total_time,
-        "throughput_mbps": throughput_mbps
+        "throughput_mbps": throughput_mbps,
+        "error": error
     }
 
 
@@ -327,7 +332,6 @@ def test_one(node, index):
         "reason": None
     }
 
-    # 每个诊断节点使用独立端口
     proxy_port = 20000 + index
     controller_port = 21000 + index
 
@@ -388,14 +392,11 @@ def test_one(node, index):
         mihomo = subprocess.Popen(
             [
                 MIHOMO_BIN,
-
                 "-d",
                 temp_dir,
-
                 "-f",
                 config_path
             ],
-
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
@@ -464,8 +465,17 @@ def test_one(node, index):
         # --------------------------------------------------
 
         print(
-            "[STEP 3] Downloading YouTube media "
-            "(maximum 1 MiB)...",
+            "[STEP 3] Downloading YouTube media...",
+            flush=True
+        )
+
+        print(
+            "          Maximum: 1 MiB",
+            flush=True
+        )
+
+        print(
+            "          Time limit: 3 seconds",
             flush=True
         )
 
@@ -477,35 +487,94 @@ def test_one(node, index):
         result["media"] = media
 
         print(
-            f"[STEP 3] SUCCESS | "
-            f"{media['bytes']:,} bytes | "
-            f"TTFB {media['ttfb']:.3f}s | "
-            f"Total {media['total_time']:.3f}s | "
+            f"[STEP 3] STATUS: {media['status']}",
+            flush=True
+        )
+
+        print(
+            f"[STEP 3] Downloaded: "
+            f"{media['bytes']:,} bytes",
+            flush=True
+        )
+
+        print(
+            f"[STEP 3] Time: "
+            f"{media['total_time']:.3f}s",
+            flush=True
+        )
+
+        if media["ttfb"] is not None:
+            print(
+                f"[STEP 3] TTFB: "
+                f"{media['ttfb']:.3f}s",
+                flush=True
+            )
+
+        print(
+            f"[STEP 3] Throughput: "
             f"{media['throughput_mbps']:.2f} Mbps",
             flush=True
         )
 
-        result["result"] = "passed"
+        if media["error"]:
+            print(
+                f"[STEP 3] Error: "
+                f"{media['error']}",
+                flush=True
+            )
 
-        print(
-            "RESULT: PASS",
-            flush=True
-        )
+        # --------------------------------------------------
+        # 判定
+        # --------------------------------------------------
+
+        if media["bytes"] > 0:
+
+            result["result"] = "passed"
+
+            if media["status"] == "complete":
+                result["reason"] = "media_1MiB_complete"
+
+            elif media["status"] == "time_limit":
+                result["reason"] = "media_3s_limit"
+
+            elif media["status"] == "error_after_data":
+                result["reason"] = "media_error_after_data"
+
+            else:
+                result["reason"] = "media_data_received"
+
+            print(
+                f"RESULT: PASS | "
+                f"{result['reason']}",
+                flush=True
+            )
+
+        else:
+
+            result["reason"] = (
+                media["error"]
+                or "media_no_data"
+            )
+
+            print(
+                f"RESULT: FAIL | "
+                f"{result['reason']}",
+                flush=True
+            )
 
     except TimeoutError as e:
 
         result["reason"] = str(e)
 
         print(
-            f"RESULT: FAIL | {result['reason']}",
+            f"RESULT: FAIL | "
+            f"{result['reason']}",
             flush=True
         )
 
     except subprocess.TimeoutExpired:
 
-        result["reason"] = (
-            "yt_dlp_timeout"
-        )
+        result["reason"] = "yt_dlp_timeout"
 
         print(
             "RESULT: FAIL | yt_dlp_timeout",
@@ -514,9 +583,7 @@ def test_one(node, index):
 
     except requests.exceptions.Timeout:
 
-        result["reason"] = (
-            "youtube_page_timeout"
-        )
+        result["reason"] = "youtube_page_timeout"
 
         print(
             "RESULT: FAIL | youtube_page_timeout",
@@ -530,7 +597,8 @@ def test_one(node, index):
         )
 
         print(
-            f"RESULT: FAIL | {result['reason']}",
+            f"RESULT: FAIL | "
+            f"{result['reason']}",
             flush=True
         )
 
@@ -541,7 +609,8 @@ def test_one(node, index):
         )
 
         print(
-            f"RESULT: FAIL | {result['reason']}",
+            f"RESULT: FAIL | "
+            f"{result['reason']}",
             flush=True
         )
 
@@ -588,7 +657,8 @@ def main():
     )
 
     print(
-        f"Stage timeout: {STAGE_TIMEOUT:.1f}s",
+        f"Stage timeout: "
+        f"{STAGE_TIMEOUT:.1f}s",
         flush=True
     )
 
@@ -630,18 +700,12 @@ def main():
         json.dump(
             {
                 "mode": "diagnostic",
-
                 "candidates": len(nodes),
-
                 "elapsed": elapsed,
-
                 "results": results
             },
-
             f,
-
             ensure_ascii=False,
-
             indent=2
         )
 
