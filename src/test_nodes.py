@@ -17,6 +17,7 @@ CANDIDATES_FILE = ROOT / "data" / "candidates.yaml"
 RESULT_FILE = ROOT / "data" / "test-results.json"
 MIHOMO_BIN = ROOT / "bin" / "mihomo"
 
+
 # ============================================================
 # Full test settings
 # ============================================================
@@ -24,7 +25,11 @@ MIHOMO_BIN = ROOT / "bin" / "mihomo"
 MAX_NODES = 1596
 CONCURRENCY = 20
 
-STAGE_TIMEOUT = 3.0
+# Independent timeout for each stage
+YOUTUBE_TIMEOUT = 3.0
+YTDLP_TIMEOUT = 8.0
+MEDIA_TIMEOUT = 3.0
+
 MIHOMO_STARTUP_TIMEOUT = 5.0
 MAX_DOWNLOAD_BYTES = 1024 * 1024
 
@@ -317,8 +322,8 @@ def test_youtube(proxy_port):
             proxies=proxies,
             stream=True,
             timeout=(
-                STAGE_TIMEOUT,
-                STAGE_TIMEOUT
+                YOUTUBE_TIMEOUT,
+                YOUTUBE_TIMEOUT
             ),
             headers=headers
         )
@@ -422,7 +427,7 @@ def extract_media_url(proxy_port):
             command,
             capture_output=True,
             text=True,
-            timeout=STAGE_TIMEOUT,
+            timeout=YTDLP_TIMEOUT,
             env=env
         )
 
@@ -518,8 +523,8 @@ def download_media(media_url, proxy_port):
             headers=headers,
             stream=True,
             timeout=(
-                STAGE_TIMEOUT,
-                STAGE_TIMEOUT
+                MEDIA_TIMEOUT,
+                MEDIA_TIMEOUT
             )
         )
 
@@ -550,7 +555,7 @@ def download_media(media_url, proxy_port):
 
             if (
                 now - start
-                >= STAGE_TIMEOUT
+                >= MEDIA_TIMEOUT
             ):
                 break
 
@@ -796,8 +801,7 @@ def test_node(index, node):
             "url_has_ipv6_ip_parameter"
         ] = (
             "ip=" in media_url
-            and ":"
-            in media_url.split(
+            and ":" in media_url.split(
                 "ip=",
                 1
             )[1].split(
@@ -965,8 +969,18 @@ def main():
     )
 
     print(
-        "Stage timeout: %.0fs"
-        % STAGE_TIMEOUT
+        "YouTube timeout: %.1fs"
+        % YOUTUBE_TIMEOUT
+    )
+
+    print(
+        "yt-dlp timeout: %.1fs"
+        % YTDLP_TIMEOUT
+    )
+
+    print(
+        "Media timeout: %.1fs"
+        % MEDIA_TIMEOUT
     )
 
     print(
