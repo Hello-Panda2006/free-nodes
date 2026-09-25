@@ -2,6 +2,11 @@ name: Fetch Free Node Sources
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: write
 
 jobs:
   fetch-sources:
