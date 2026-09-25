@@ -50,6 +50,10 @@ jobs:
         run: |
           python src/select_nodes.py
 
+      - name: Analyze duplicates
+        run: |
+          python src/analyze_duplicates.py
+
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
