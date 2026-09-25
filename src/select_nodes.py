@@ -3,6 +3,7 @@ import yaml
 from pathlib import Path
 
 
+CANDIDATES_FILE = Path("data/candidates.yaml")
 RESULTS_FILE = Path("data/test-results.json")
 OUTPUT_FILE = Path("data/free-nodes.yaml")
 
@@ -10,23 +11,84 @@ MIN_SPEED_MBPS = 12.0
 MAX_NODES = 100
 
 
-def main():
-    if not RESULTS_FILE.exists():
-        raise FileNotFoundError(f"Results file not found: {RESULTS_FILE}")
+def load_candidates():
+    with CANDIDATES_FILE.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
 
+    if isinstance(data, dict):
+        candidates = data.get("proxies", [])
+    elif isinstance(data, list):
+        candidates = data
+    else:
+        candidates = []
+
+    return candidates
+
+
+def load_results():
     with RESULTS_FILE.open("r", encoding="utf-8") as f:
-        results = json.load(f)
+        data = json.load(f)
 
-    if isinstance(results, dict):
-        results = results.get("results", [])
+    if isinstance(data, dict):
+        return data.get("results", [])
 
-    candidates = []
+    if isinstance(data, list):
+        return data
 
-    for item in results:
-        if not isinstance(item, dict):
+    return []
+
+
+def main():
+    if not CANDIDATES_FILE.exists():
+        raise FileNotFoundError(
+            f"Candidates file not found: {CANDIDATES_FILE}"
+        )
+
+    if not RESULTS_FILE.exists():
+        raise FileNotFoundError(
+            f"Test results file not found: {RESULTS_FILE}"
+        )
+
+    candidates = load_candidates()
+    results = load_results()
+
+    print(f"Loaded candidates: {len(candidates)}")
+    print(f"Loaded test results: {len(results)}")
+
+    # 根据 index 建立节点索引
+    candidate_map = {}
+
+    for index, node in enumerate(candidates, start=1):
+        if isinstance(node, dict):
+            candidate_map[index] = node
+
+    qualified = []
+
+    for result in results:
+        if not isinstance(result, dict):
             continue
 
-        throughput = item.get("throughput_mbps")
+        index = result.get("index")
+
+        if not isinstance(index, int):
+            continue
+
+        # 必须存在对应的完整节点配置
+        node = candidate_map.get(index)
+
+        if not isinstance(node, dict):
+            continue
+
+        media = result.get("media")
+
+        if not isinstance(media, dict):
+            continue
+
+        # 必须完整下载 1 MiB
+        if media.get("status") != "complete":
+            continue
+
+        throughput = media.get("throughput_mbps")
 
         if throughput is None:
             continue
@@ -36,50 +98,41 @@ def main():
         except (TypeError, ValueError):
             continue
 
-        # 只保留实际媒体下载速度 >= 12 Mbps 的节点
+        # 速度必须 >= 12 Mbps
         if throughput < MIN_SPEED_MBPS:
             continue
 
-        # 必须是实际媒体测试成功的节点
-        media_status = item.get("media_status")
-
-        if media_status not in ("complete", "partial"):
-            continue
-
-        proxy = item.get("proxy")
-
-        if not isinstance(proxy, dict):
-            continue
-
-        node = dict(proxy)
-
-        # 清理内部字段
-        node = {
-            k: v
-            for k, v in node.items()
-            if not str(k).startswith("_")
-        }
-
-        candidates.append({
+        qualified.append({
+            "index": index,
+            "name": result.get("name", node.get("name", "")),
+            "type": result.get("type", node.get("type", "")),
             "throughput_mbps": throughput,
             "node": node,
-            "name": node.get("name", ""),
         })
 
-    # 按实际下载速度从高到低排序
-    candidates.sort(
+    # 按实际媒体下载速度从高到低排序
+    qualified.sort(
         key=lambda x: x["throughput_mbps"],
         reverse=True
     )
 
     # 最多保留 100 个
-    selected = candidates[:MAX_NODES]
+    selected = qualified[:MAX_NODES]
 
-    # 最终只输出节点配置
+    # 只输出完整节点配置
     proxies = []
 
     for item in selected:
-        proxies.append(item["node"])
+        node = dict(item["node"])
+
+        # 删除内部字段
+        node = {
+            key: value
+            for key, value in node.items()
+            if not str(key).startswith("_")
+        }
+
+        proxies.append(node)
 
     output = {
         "proxies": proxies
@@ -96,28 +149,41 @@ def main():
             default_flow_style=False
         )
 
+    # 输出统计信息
     print()
     print("=" * 60)
     print("FREE NODE SELECTION")
     print("=" * 60)
-    print(f"Minimum speed: {MIN_SPEED_MBPS} Mbps")
-    print(f"Maximum nodes: {MAX_NODES}")
-    print(f"Qualified nodes: {len(candidates)}")
-    print(f"Selected nodes: {len(selected)}")
+
+    print(f"Minimum speed:      {MIN_SPEED_MBPS:.1f} Mbps")
+    print(f"Maximum nodes:      {MAX_NODES}")
+    print(f"Qualified nodes:    {len(qualified)}")
+    print(f"Selected nodes:     {len(selected)}")
+    print(f"Output file:        {OUTPUT_FILE}")
 
     if selected:
         print()
         print("Top selected nodes:")
 
-        for i, item in enumerate(selected[:10], 1):
+        for position, item in enumerate(selected[:20], start=1):
             print(
-                f"{i:02d}. "
-                f"{item['throughput_mbps']:.2f} Mbps - "
+                f"{position:03d}. "
+                f"{item['throughput_mbps']:8.2f} Mbps  "
+                f"{item['type']:12s}  "
                 f"{item['name']}"
             )
 
-    print()
-    print(f"Output: {OUTPUT_FILE}")
+        print()
+
+        print(
+            f"Fastest: {selected[0]['throughput_mbps']:.2f} Mbps"
+        )
+
+        print(
+            f"Slowest selected: "
+            f"{selected[-1]['throughput_mbps']:.2f} Mbps"
+        )
+
     print("=" * 60)
 
 
