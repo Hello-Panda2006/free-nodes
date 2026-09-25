@@ -35,7 +35,7 @@ if not proxies:
 return proxies[0]
 ```
 
-def write_mihomo_config(node, config_path):
+def write_mihomo_config(node, path):
 config = {
 "mixed-port": 7890,
 "external-controller": "127.0.0.1:9090",
@@ -61,7 +61,7 @@ config = {
     ]
 }
 
-with open(config_path, "w", encoding="utf-8") as f:
+with open(path, "w", encoding="utf-8") as f:
     yaml.safe_dump(
         config,
         f,
@@ -80,8 +80,8 @@ while time.perf_counter() - start < MIHOMO_STARTUP_TIMEOUT:
 
     if process.poll() is not None:
         raise RuntimeError(
-            "Mihomo exited during startup: "
-            + str(process.returncode)
+            f"Mihomo exited during startup, "
+            f"return code={process.returncode}"
         )
 
     try:
@@ -106,7 +106,7 @@ raise TimeoutError(
 def test_youtube_page():
 proxies = {
 "http": "http://" + MIHOMO_PROXY,
-"https": "http://" + MIHOMO_PROXY
+"https": "http://" + MIHOMO_PROXY,
 }
 
 ```
@@ -133,94 +133,72 @@ response.raise_for_status()
 return {
     "status_code": response.status_code,
     "elapsed": elapsed,
-    "bytes": len(response.content)
+    "bytes": len(response.content),
 }
 ```
 
-def extract_media_info():
-command = [
-"yt-dlp",
+def extract_media_url():
 
 ```
-    "--no-playlist",
-    "--skip-download",
-    "--dump-single-json",
-    "--no-warnings",
+output = subprocess.run(
+    [
+        "yt-dlp",
 
-    "--socket-timeout",
-    str(STAGE_TIMEOUT),
+        "--no-playlist",
 
-    "-f",
-    (
-        "bestvideo[height<=1080][vcodec^=vp9]"
-        "/bestvideo[height<=1080][vcodec^=avc1]"
-        "/bestvideo[height<=1080]"
-    ),
+        "--skip-download",
 
-    TEST_VIDEO_URL
-]
+        "-g",
 
-result = subprocess.run(
-    command,
+        "--no-warnings",
+
+        "--socket-timeout",
+        str(STAGE_TIMEOUT),
+
+        "-f",
+        (
+            "bestvideo[height<=1080][vcodec^=vp9]"
+            "/bestvideo[height<=1080][vcodec^=avc1]"
+            "/bestvideo[height<=1080]"
+        ),
+
+        TEST_VIDEO_URL,
+    ],
     capture_output=True,
     text=True,
-    timeout=STAGE_TIMEOUT
+    timeout=STAGE_TIMEOUT,
 )
 
-if result.returncode != 0:
+if output.returncode != 0:
     raise RuntimeError(
         "yt-dlp failed: "
-        + result.stderr[-1000:]
+        + output.stderr[-1000:]
     )
 
-data = json.loads(result.stdout)
-
-downloads = data.get("requested_downloads") or []
-
-if not downloads:
-    raise RuntimeError(
-        "yt-dlp returned no requested_downloads"
-    )
-
-media = downloads[0]
-
-media_url = media.get("url")
+media_url = output.stdout.strip().splitlines()
 
 if not media_url:
     raise RuntimeError(
         "yt-dlp returned no media URL"
     )
 
-return {
-    "media_url": media_url,
-    "format_id": media.get("format_id"),
-    "width": media.get("width"),
-    "height": media.get("height"),
-    "vcodec": media.get("vcodec"),
-    "acodec": media.get("acodec"),
-    "fps": media.get("fps"),
-    "tbr": media.get("tbr"),
-    "vbr": media.get("vbr"),
-    "abr": media.get("abr"),
-    "protocol": media.get("protocol"),
-    "ext": media.get("ext"),
-    "filesize": media.get("filesize")
-}
+return media_url[0]
 ```
 
 def download_media(media_url):
-proxies = {
-"http": "http://" + MIHOMO_PROXY,
-"https": "http://" + MIHOMO_PROXY
-}
 
 ```
-start = time.perf_counter()
+proxies = {
+    "http": "http://" + MIHOMO_PROXY,
+    "https": "http://" + MIHOMO_PROXY,
+}
+
+stage_start = time.perf_counter()
 
 downloaded = 0
 first_byte_time = None
 
-with requests.get(
+response = requests.get(
     media_url,
     proxies=proxies,
     stream=True,
@@ -233,9 +211,13 @@ with requests.get(
             "Chrome/131.0 Safari/537.36"
         )
     }
-) as response:
+)
 
-    response.raise_for_status()
+response.raise_for_status()
+
+try:
+
+    header_time = time.perf_counter()
 
     for chunk in response.iter_content(
         chunk_size=64 * 1024
@@ -243,9 +225,9 @@ with requests.get(
 
         now = time.perf_counter()
 
-        if now - start > STAGE_TIMEOUT:
+        if now - stage_start > STAGE_TIMEOUT:
             raise TimeoutError(
-                "Media download exceeded "
+                f"Media download exceeded "
                 f"{STAGE_TIMEOUT:.1f} seconds"
             )
 
@@ -270,19 +252,29 @@ with requests.get(
         if downloaded >= MAX_DOWNLOAD_BYTES:
             break
 
-end = time.perf_counter()
+finally:
+    response.close()
+
+stage_end = time.perf_counter()
 
 if first_byte_time is None:
     raise RuntimeError(
         "Media server returned no data"
     )
 
-total_time = end - start
-ttfb = first_byte_time - start
-download_time = end - first_byte_time
+ttfb = first_byte_time - stage_start
+
+download_time = (
+    stage_end - first_byte_time
+)
+
+total_time = (
+    stage_end - stage_start
+)
 
 throughput_mbps = (
-    downloaded * 8
+    downloaded
+    * 8
     / total_time
     / 1_000_000
 )
@@ -292,29 +284,54 @@ return {
     "ttfb": ttfb,
     "download_time": download_time,
     "total_time": total_time,
-    "throughput_mbps": throughput_mbps
+    "throughput_mbps": throughput_mbps,
 }
 ```
 
 def worker(node):
 
 ```
-print("")
-print("free-nodes - single YouTube media test")
-print("")
+print(
+    "",
+    flush=True
+)
 
-print("Node name:", node.get("name"))
-print("Protocol:", node.get("type"))
 print(
-    f"Stage timeout: {STAGE_TIMEOUT:.1f} seconds"
+    "free-nodes - single YouTube media test",
+    flush=True
 )
+
 print(
-    "Mihomo startup timeout: "
-    f"{MIHOMO_STARTUP_TIMEOUT:.1f} seconds"
+    "",
+    flush=True
 )
+
 print(
-    "Maximum download:",
-    f"{MAX_DOWNLOAD_BYTES:,} bytes"
+    f"Node name: {node.get('name')}",
+    flush=True
+)
+
+print(
+    f"Protocol:  {node.get('type')}",
+    flush=True
+)
+
+print(
+    f"Stage timeout: "
+    f"{STAGE_TIMEOUT:.1f} seconds",
+    flush=True
+)
+
+print(
+    f"Mihomo startup timeout: "
+    f"{MIHOMO_STARTUP_TIMEOUT:.1f} seconds",
+    flush=True
+)
+
+print(
+    f"Maximum download: "
+    f"{MAX_DOWNLOAD_BYTES:,} bytes",
+    flush=True
 )
 
 mihomo = None
@@ -336,11 +353,14 @@ try:
     )
 
     print(
-        "Temporary config:",
-        config_path
+        f"Temporary config: {config_path}",
+        flush=True
     )
 
-    print("Starting Mihomo...")
+    print(
+        "Starting Mihomo...",
+        flush=True
+    )
 
     mihomo = subprocess.Popen(
         [
@@ -348,62 +368,93 @@ try:
             "-d",
             temp_dir,
             "-f",
-            config_path
+            config_path,
         ],
+
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
     )
 
-    print("")
-    print("STEP 0: Mihomo startup")
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "STEP 0: Mihomo startup",
+        flush=True
+    )
 
     startup_time = wait_for_mihomo(
         mihomo
     )
 
     print(
-        "Mihomo controller is ready:",
-        MIHOMO_CONTROLLER
+        "Mihomo controller is ready: "
+        f"{MIHOMO_CONTROLLER}",
+        flush=True
     )
 
     print(
-        "Mihomo proxy is ready:",
-        MIHOMO_PROXY
+        "Mihomo proxy is ready: "
+        f"{MIHOMO_PROXY}",
+        flush=True
     )
 
     print(
         f"Mihomo startup time: "
-        f"{startup_time:.3f}s"
+        f"{startup_time:.3f}s",
+        flush=True
     )
 
-    print("")
-    print("STEP 1: YouTube page")
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "STEP 1: YouTube page",
+        flush=True
+    )
 
     page = test_youtube_page()
 
     print(
-        "HTTP status:",
-        page["status_code"]
+        f"HTTP status: "
+        f"{page['status_code']}",
+        flush=True
     )
 
     print(
         f"Page elapsed: "
-        f"{page['elapsed']:.3f}s"
+        f"{page['elapsed']:.3f}s",
+        flush=True
     )
 
     print(
         f"Page bytes: "
-        f"{page['bytes']:,}"
+        f"{page['bytes']:,}",
+        flush=True
     )
 
-    print("YouTube page test: SUCCESS")
+    print(
+        "YouTube page test: SUCCESS",
+        flush=True
+    )
 
-    print("")
-    print("STEP 2: yt-dlp media extraction")
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "STEP 2: yt-dlp media extraction",
+        flush=True
+    )
 
     extraction_start = time.perf_counter()
 
-    media_info = extract_media_info()
+    media_url = extract_media_url()
 
     extraction_time = (
         time.perf_counter()
@@ -412,10 +463,243 @@ try:
 
     print(
         f"Extraction elapsed: "
-        f"{extraction_time:.3f}s"
+        f"{extraction_time:.3f}s",
+        flush=True
     )
 
     print(
-        "Format ID:",
-        media_info["format_id"]
+        "yt-dlp extraction: SUCCESS",
+        flush=True
+    )
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "STEP 3: Real YouTube media download",
+        flush=True
+    )
+
+    print(
+        f"Maximum download: "
+        f"{MAX_DOWNLOAD_BYTES:,} bytes",
+        flush=True
+    )
+
+    media = download_media(
+        media_url
+    )
+
+    print(
+        f"Media download: "
+        f"{media['bytes']:,} bytes",
+        flush=True
+    )
+
+    print(
+        f"Download time: "
+        f"{media['download_time']:.3f}s",
+        flush=True
+    )
+
+    print(
+        f"Media TTFB: "
+        f"{media['ttfb']:.3f}s",
+        flush=True
+    )
+
+    print(
+        f"Throughput: "
+        f"{media['throughput_mbps']:.2f} Mbps",
+        flush=True
+    )
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "FINAL RESULT",
+        flush=True
+    )
+
+    print(
+        "Result:            SUCCESS",
+        flush=True
+    )
+
+    return 0
+
+except TimeoutError as e:
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "FINAL RESULT",
+        flush=True
+    )
+
+    print(
+        "Result:            FAILED",
+        flush=True
+    )
+
+    print(
+        f"Reason:            {e}",
+        flush=True
+    )
+
+    return 1
+
+except subprocess.TimeoutExpired:
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "FINAL RESULT",
+        flush=True
+    )
+
+    print(
+        "Result:            FAILED",
+        flush=True
+    )
+
+    print(
+        "Reason:            "
+        "yt-dlp extraction exceeded "
+        "3.0 seconds",
+        flush=True
+    )
+
+    return 1
+
+except Exception as e:
+
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "FINAL RESULT",
+        flush=True
+    )
+
+    print(
+        "Result:            FAILED",
+        flush=True
+    )
+
+    print(
+        f"Reason:            "
+        f"{type(e).__name__}: {e}",
+        flush=True
+    )
+
+    return 1
+
+finally:
+
+    if mihomo is not None:
+
+        try:
+
+            mihomo.terminate()
+
+            try:
+                mihomo.wait(
+                    timeout=2
+                )
+
+            except subprocess.TimeoutExpired:
+
+                mihomo.kill()
+
+                mihomo.wait(
+                    timeout=2
+                )
+
+        except Exception:
+            pass
 ```
+
+def worker_entry(node):
+
+```
+exit_code = worker(node)
+
+raise SystemExit(
+    exit_code
+)
+```
+
+def main():
+
+```
+node = load_first_node()
+
+print(
+    "Starting single-node worker...",
+    flush=True
+)
+
+process = multiprocessing.Process(
+    target=worker_entry,
+    args=(node,)
+)
+
+process.start()
+
+maximum_runtime = (
+    MIHOMO_STARTUP_TIMEOUT
+    + STAGE_TIMEOUT * 3
+    \+ 5
+)
+
+process.join(
+    timeout=maximum_runtime
+)
+
+if process.is_alive():
+
+    print(
+        "Worker exceeded safety timeout. "
+        "Terminating.",
+        flush=True
+    )
+
+    process.terminate()
+
+    process.join(
+        timeout=2
+    )
+
+    if process.is_alive():
+
+        process.kill()
+
+        process.join()
+
+    raise SystemExit(1)
+
+if process.exitcode is None:
+    raise SystemExit(1)
+
+if process.exitcode == 0:
+    raise SystemExit(0)
+
+raise SystemExit(1)
+```
+
+if **name** == "**main**":
+main()
