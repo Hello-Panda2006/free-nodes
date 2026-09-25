@@ -1,2 +1,3 @@
-PyYAML
 requests
+PyYAML
+yt-dlp
