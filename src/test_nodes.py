@@ -13,32 +13,22 @@ import yaml
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CANDIDATES_FILE = os.path.join(
-    ROOT,
-    "data",
-    "candidates.yaml",
+    ROOT, "data", "candidates.yaml"
 )
 
 SETTINGS_FILE = os.path.join(
-    ROOT,
-    "config",
-    "settings.yaml",
+    ROOT, "config", "settings.yaml"
 )
 
 RESULT_FILE = os.path.join(
-    ROOT,
-    "data",
-    "test-results.json",
+    ROOT, "data", "test-results.json"
 )
 
 MIHOMO_BIN = os.path.join(
-    ROOT,
-    "bin",
-    "mihomo",
+    ROOT, "bin", "mihomo"
 )
 
-YOUTUBE_URL = (
-    "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-)
+YOUTUBE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 BASE_PROXY_PORT = 20000
 BASE_CONTROLLER_PORT = 21000
@@ -56,84 +46,53 @@ def load_yaml(path):
 def safe_float(value):
     if value is None:
         return None
-
     return round(float(value), 4)
 
 
-def build_mihomo_config(
-    proxy,
-    proxy_port,
-    controller_port,
-):
-    """
-    Create an isolated Mihomo configuration for one node.
-    """
-
-    test_proxy_name = "__TEST_PROXY__"
-
+def build_mihomo_config(proxy, proxy_port, controller_port):
     proxy_config = dict(proxy)
+    proxy_config["name"] = "__TEST_PROXY__"
 
-    proxy_config["name"] = test_proxy_name
-
-    config = {
+    return {
         "mixed-port": proxy_port,
         "allow-lan": False,
-
         "external-controller": (
             f"127.0.0.1:{controller_port}"
         ),
-
         "log-level": "error",
-
         "proxies": [
             proxy_config
         ],
-
         "proxy-groups": [
             {
                 "name": "__TEST_GROUP__",
                 "type": "select",
                 "proxies": [
-                    test_proxy_name
+                    "__TEST_PROXY__"
                 ],
             }
         ],
-
         "rules": [
             "MATCH,__TEST_GROUP__"
         ],
     }
 
-    return config
 
-
-def wait_for_mihomo(
-    controller_port,
-    process,
-):
-    """
-    Only test whether Mihomo itself is ready.
-
-    This does NOT test whether the candidate node can reach
-    YouTube.
-    """
-
+def wait_for_mihomo(controller_port, process):
     url = (
-        f"http://127.0.0.1:"
-        f"{controller_port}/version"
+        f"http://127.0.0.1:{controller_port}/version"
     )
 
     deadline = time.time() + STARTUP_TIMEOUT
 
     while time.time() < deadline:
-
         if process.poll() is not None:
             return False, "mihomo_process_exit"
 
         try:
             response = requests.get(
                 url,
-                timeout=0.5,
+                timeout=0.5
             )
 
             if response.status_code == 200:
@@ -148,18 +107,7 @@ def wait_for_mihomo(
 
 
 def test_youtube_page(proxy_port):
-    """
-    Test YouTube page/control-plane connectivity.
-
-    Maximum stage time:
-        HTTP_TIMEOUT
-
-    Returns timing and response information.
-    """
-
-    proxy = (
-        f"http://127.0.0.1:{proxy_port}"
-    )
+    proxy = f"http://127.0.0.1:{proxy_port}"
 
     proxies = {
         "http": proxy,
@@ -167,12 +115,10 @@ def test_youtube_page(proxy_port):
     }
 
     start = time.time()
-
     ttfb = None
     total_bytes = 0
 
     try:
-
         with requests.get(
             YOUTUBE_URL,
             proxies=proxies,
@@ -193,30 +139,23 @@ def test_youtube_page(proxy_port):
             ttfb = time.time() - start
 
             if response.status_code != 200:
-
                 return {
                     "success": False,
-                    "status_code": (
-                        response.status_code
-                    ),
+                    "status_code": response.status_code,
                     "ttfb": safe_float(ttfb),
                     "elapsed": safe_float(
                         time.time() - start
                     ),
                     "bytes": 0,
                     "error": (
-                        f"http_status_"
-                        f"{response.status_code}"
+                        f"http_status_{response.status_code}"
                     ),
                 }
 
             for chunk in response.iter_content(
                 chunk_size=65536
             ):
-
-                elapsed = (
-                    time.time() - start
-                )
+                elapsed = time.time() - start
 
                 if elapsed >= HTTP_TIMEOUT:
                     break
@@ -226,31 +165,21 @@ def test_youtube_page(proxy_port):
 
                 total_bytes += len(chunk)
 
-                if (
-                    total_bytes
-                    >= 1024 * 1024
-                ):
+                if total_bytes >= 1024 * 1024:
                     break
-
-            elapsed = (
-                time.time() - start
-            )
 
             return {
                 "success": True,
-                "status_code": (
-                    response.status_code
-                ),
+                "status_code": response.status_code,
                 "ttfb": safe_float(ttfb),
                 "elapsed": safe_float(
-                    elapsed
+                    time.time() - start
                 ),
                 "bytes": total_bytes,
                 "error": None,
             }
 
     except Exception as e:
-
         return {
             "success": False,
             "status_code": None,
@@ -267,53 +196,35 @@ def test_youtube_page(proxy_port):
 
 
 def extract_media_url(proxy_port):
-    """
-    Use yt-dlp through the candidate proxy.
-
-    The --proxy argument is explicitly specified so that
-    yt-dlp cannot accidentally perform the extraction directly.
-    """
-
-    proxy = (
-        f"http://127.0.0.1:{proxy_port}"
-    )
+    proxy = f"http://127.0.0.1:{proxy_port}"
 
     format_selector = (
-        "bestvideo[height<=1080]"
-        "[vcodec^=vp9]/"
-        "bestvideo[height<=1080]"
-        "[vcodec^=avc1]/"
+        "bestvideo[height<=1080][vcodec^=vp9]/"
+        "bestvideo[height<=1080][vcodec^=avc1]/"
         "bestvideo[height<=1080]"
     )
 
     command = [
         "yt-dlp",
-
         "--no-warnings",
         "--no-playlist",
-
         "--socket-timeout",
         "2",
-
         "--proxy",
         proxy,
-
         "-f",
         format_selector,
-
         "-g",
         YOUTUBE_URL,
     ]
 
     env = os.environ.copy()
-
     env["HTTP_PROXY"] = proxy
     env["HTTPS_PROXY"] = proxy
 
     start = time.time()
 
     try:
-
         completed = subprocess.run(
             command,
             stdout=subprocess.PIPE,
@@ -323,17 +234,12 @@ def extract_media_url(proxy_port):
             env=env,
         )
 
-        elapsed = (
-            time.time() - start
-        )
+        elapsed = time.time() - start
 
         if completed.returncode != 0:
-
             return {
                 "success": False,
-                "elapsed": safe_float(
-                    elapsed
-                ),
+                "elapsed": safe_float(elapsed),
                 "media_url": None,
                 "error": (
                     completed.stderr[-1000:]
@@ -348,27 +254,21 @@ def extract_media_url(proxy_port):
         )
 
         if not media_urls:
-
             return {
                 "success": False,
-                "elapsed": safe_float(
-                    elapsed
-                ),
+                "elapsed": safe_float(elapsed),
                 "media_url": None,
                 "error": "empty_media_url",
             }
 
         return {
             "success": True,
-            "elapsed": safe_float(
-                elapsed
-            ),
+            "elapsed": safe_float(elapsed),
             "media_url": media_urls[0],
             "error": None,
         }
 
     except subprocess.TimeoutExpired:
-
         return {
             "success": False,
             "elapsed": safe_float(
@@ -379,7 +279,6 @@ def extract_media_url(proxy_port):
         }
 
     except Exception as e:
-
         return {
             "success": False,
             "elapsed": safe_float(
@@ -393,25 +292,8 @@ def extract_media_url(proxy_port):
         }
 
 
-def download_media(
-    media_url,
-    proxy_port,
-):
-    """
-    Download actual YouTube media.
-
-    Maximum:
-        HTTP_TIMEOUT seconds
-        MAX_DOWNLOAD_BYTES bytes
-
-    If the node downloads less than 1 MiB within
-    the 3-second window, the result is still retained
-    as a valid speed measurement.
-    """
-
-    proxy = (
-        f"http://127.0.0.1:{proxy_port}"
-    )
+def download_media(media_url, proxy_port):
+    proxy = f"http://127.0.0.1:{proxy_port}"
 
     proxies = {
         "http": proxy,
@@ -419,12 +301,10 @@ def download_media(
     }
 
     start = time.time()
-
     ttfb = None
     total_bytes = 0
 
     try:
-
         with requests.get(
             media_url,
             proxies=proxies,
@@ -442,20 +322,12 @@ def download_media(
             },
         ) as response:
 
-            ttfb = (
-                time.time() - start
-            )
+            ttfb = time.time() - start
 
-            if response.status_code not in (
-                200,
-                206,
-            ):
-
+            if response.status_code not in (200, 206):
                 return {
                     "success": False,
-                    "status_code": (
-                        response.status_code
-                    ),
+                    "status_code": response.status_code,
                     "status": "http_error",
                     "bytes": 0,
                     "elapsed": safe_float(
@@ -464,18 +336,14 @@ def download_media(
                     "ttfb": safe_float(ttfb),
                     "throughput_mbps": 0,
                     "error": (
-                        f"http_status_"
-                        f"{response.status_code}"
+                        f"http_status_{response.status_code}"
                     ),
                 }
 
             for chunk in response.iter_content(
                 chunk_size=65536
             ):
-
-                elapsed = (
-                    time.time() - start
-                )
+                elapsed = time.time() - start
 
                 if elapsed >= HTTP_TIMEOUT:
                     break
@@ -496,20 +364,12 @@ def download_media(
 
                 total_bytes += len(chunk)
 
-                if (
-                    total_bytes
-                    >= MAX_DOWNLOAD_BYTES
-                ):
+                if total_bytes >= MAX_DOWNLOAD_BYTES:
                     break
 
-            elapsed = (
-                time.time() - start
-            )
+            elapsed = time.time() - start
 
-            if (
-                total_bytes
-                >= MAX_DOWNLOAD_BYTES
-            ):
+            if total_bytes >= MAX_DOWNLOAD_BYTES:
                 status = "completed_1mb"
             else:
                 status = "time_limit"
@@ -525,14 +385,10 @@ def download_media(
 
             return {
                 "success": True,
-                "status_code": (
-                    response.status_code
-                ),
+                "status_code": response.status_code,
                 "status": status,
                 "bytes": total_bytes,
-                "elapsed": safe_float(
-                    elapsed
-                ),
+                "elapsed": safe_float(elapsed),
                 "ttfb": safe_float(ttfb),
                 "throughput_mbps": safe_float(
                     throughput
@@ -541,10 +397,7 @@ def download_media(
             }
 
     except Exception as e:
-
-        elapsed = (
-            time.time() - start
-        )
+        elapsed = time.time() - start
 
         throughput = (
             total_bytes
@@ -560,9 +413,7 @@ def download_media(
             "status_code": None,
             "status": "request_error",
             "bytes": total_bytes,
-            "elapsed": safe_float(
-                elapsed
-            ),
+            "elapsed": safe_float(elapsed),
             "ttfb": safe_float(ttfb),
             "throughput_mbps": safe_float(
                 throughput
@@ -574,22 +425,15 @@ def download_media(
         }
 
 
-def test_node(
-    index,
-    proxy,
-):
-    """
-    Complete test of one candidate node.
-    """
-
-    original_name = proxy.get(
+def test_node(index, proxy):
+    name = proxy.get(
         "name",
-        f"node-{index}",
+        f"node-{index}"
     )
 
     protocol = proxy.get(
         "type",
-        "unknown",
+        "unknown"
     )
 
     proxy_port = (
@@ -602,18 +446,70 @@ def test_node(
 
     result = {
         "index": index,
-        "name": original_name,
+        "name": name,
         "protocol": protocol,
-
         "proxy_port": proxy_port,
         "controller_port": controller_port,
-
         "success": False,
-
         "mihomo": {},
         "youtube": {},
         "yt_dlp": {},
         "media": {},
-
         "failure_stage": None,
-        "f
+        "failure_reason": None,
+        "started_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime()
+        ),
+    }
+
+    temp_dir = None
+    process = None
+
+    overall_start = time.time()
+
+    try:
+        temp_dir = tempfile.mkdtemp(
+            prefix=f"free-node-{index}-"
+        )
+
+        config_path = os.path.join(
+            temp_dir,
+            "config.yaml"
+        )
+
+        config = build_mihomo_config(
+            proxy,
+            proxy_port,
+            controller_port
+        )
+
+        with open(
+            config_path,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            yaml.safe_dump(
+                config,
+                f,
+                allow_unicode=True,
+                sort_keys=False
+            )
+
+        # STEP 0: Mihomo startup
+
+        start = time.time()
+
+        process = subprocess.Popen(
+            [
+                MIHOMO_BIN,
+                "-d",
+                temp_dir,
+                "-f",
+                config_path,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        ready, error = wait_for_mih
