@@ -1,278 +1,358 @@
 import json
 import os
+import socket
 import subprocess
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
 import yaml
 
 
+# ============================================================
+# Basic configuration
+# ============================================================
+
 ROOT = Path(__file__).resolve().parent.parent
+
 CANDIDATES_FILE = ROOT / "data" / "candidates.yaml"
 RESULT_FILE = ROOT / "data" / "test-results.json"
-MIHOMO = ROOT / "bin" / "mihomo"
+MIHOMO_BIN = ROOT / "bin" / "mihomo"
 
 MAX_NODES = 20
 CONCURRENCY = 5
 
-STAGE_TIMEOUT = 3
-MIHOMO_STARTUP_TIMEOUT = 5
+STAGE_TIMEOUT = 3.0
+MIHOMO_STARTUP_TIMEOUT = 5.0
 MAX_DOWNLOAD_BYTES = 1024 * 1024
 
 YOUTUBE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
+BASE_PROXY_PORT = 20000
+BASE_CONTROLLER_PORT = 21000
+
+
+# ============================================================
+# Load candidates
+# ============================================================
 
 def load_candidates():
     with open(CANDIDATES_FILE, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     if isinstance(data, dict):
-        nodes = data.get("proxies", [])
+        candidates = data.get("proxies", [])
     elif isinstance(data, list):
-        nodes = data
+        candidates = data
     else:
-        raise ValueError("Invalid candidates.yaml format")
+        raise RuntimeError("Unsupported candidates.yaml format")
 
-    if not isinstance(nodes, list):
-        raise ValueError("candidates.yaml proxies must be a list")
+    if not isinstance(candidates, list):
+        raise RuntimeError("candidates.yaml must contain a list of proxies")
 
-    return nodes[:MAX_NODES]
+    candidates = candidates[:MAX_NODES]
 
+    return candidates
+
+
+# ============================================================
+# Build temporary Mihomo configuration
+# ============================================================
 
 def make_config(node, proxy_port, controller_port):
+    node_name = node.get("name")
+
+    if not node_name:
+        raise RuntimeError("Node has no name")
+
     config = {
         "mixed-port": proxy_port,
-        "external-controller": f"127.0.0.1:{controller_port}",
+        "external-controller": "127.0.0.1:" + str(controller_port),
+
         "mode": "rule",
         "log-level": "error",
+
         "allow-lan": False,
         "ipv6": True,
+
         "proxies": [node],
+
         "proxy-groups": [
             {
                 "name": "TEST",
                 "type": "select",
-                "proxies": [node["name"]],
+                "proxies": [node_name],
             }
         ],
+
         "rules": [
             "MATCH,TEST"
-        ],
+        ]
     }
 
     return config
 
 
-def wait_controller(port):
-    url = f"http://127.0.0.1:{port}/version"
-    deadline = time.monotonic() + MIHOMO_STARTUP_TIMEOUT
+# ============================================================
+# Wait for Mihomo Controller
+# ============================================================
 
-    while time.monotonic() < deadline:
-        try:
-            r = requests.get(url, timeout=0.3)
-            if r.status_code == 200:
-                return True
-        except Exception:
-            pass
-
-        time.sleep(0.05)
-
-    return False
-
-
-def wait_proxy(port):
-    deadline = time.monotonic() + 2
-
-    while time.monotonic() < deadline:
-        try:
-            sock = requests.Session()
-            sock.proxies.update({
-                "http": f"http://127.0.0.1:{port}",
-                "https": f"http://127.0.0.1:{port}",
-            })
-
-            r = sock.get(
-                "http://www.gstatic.com/generate_204",
-                timeout=0.5,
-            )
-
-            if r.status_code in (200, 204, 301, 302):
-                return True
-
-        except Exception:
-            pass
-
-        time.sleep(0.05)
-
-    return False
-
-
-def start_mihomo(node, proxy_port, controller_port):
-    temp_dir = tempfile.mkdtemp(prefix="free_nodes_")
-    config_file = Path(temp_dir) / "config.yaml"
-    log_file = Path(temp_dir) / "mihomo.log"
-
-    config = make_config(node, proxy_port, controller_port)
-
-    with open(config_file, "w", encoding="utf-8") as f:
-        yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
-
-    log = open(log_file, "w", encoding="utf-8")
+def wait_controller(controller_port, process, timeout):
+    url = "http://127.0.0.1:" + str(controller_port) + "/version"
 
     start = time.monotonic()
+
+    while time.monotonic() - start < timeout:
+        if process.poll() is not None:
+            return False, "mihomo_exited"
+
+        try:
+            r = requests.get(url, timeout=0.3)
+
+            if r.status_code == 200:
+                return True, None
+
+        except requests.RequestException:
+            pass
+
+        time.sleep(0.05)
+
+    return False, "controller_timeout"
+
+
+# ============================================================
+# Check whether local proxy port is listening
+#
+# IMPORTANT:
+# Do NOT test Google/Youtube here.
+# This function only checks whether Mihomo's local TCP
+# proxy listener has started.
+# ============================================================
+
+def wait_proxy_port(proxy_port, process, timeout):
+    start = time.monotonic()
+
+    while time.monotonic() - start < timeout:
+        if process.poll() is not None:
+            return False, "mihomo_exited"
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.2)
+
+        try:
+            sock.connect(("127.0.0.1", proxy_port))
+            sock.close()
+            return True, None
+
+        except OSError:
+            sock.close()
+
+        time.sleep(0.05)
+
+    return False, "proxy_port_timeout"
+
+
+# ============================================================
+# Start Mihomo
+# ============================================================
+
+def start_mihomo(node, proxy_port, controller_port, config_dir):
+    config = make_config(
+        node,
+        proxy_port,
+        controller_port
+    )
+
+    config_file = config_dir / "config.yaml"
+
+    with open(config_file, "w", encoding="utf-8") as f:
+        yaml.safe_dump(
+            config,
+            f,
+            allow_unicode=True,
+            sort_keys=False
+        )
+
+    log_file = open(
+        config_dir / "mihomo.log",
+        "w",
+        encoding="utf-8"
+    )
+
+    start_time = time.monotonic()
 
     process = subprocess.Popen(
         [
-            str(MIHOMO),
+            str(MIHOMO_BIN),
             "-d",
-            temp_dir,
-            "-f",
-            str(config_file),
+            str(config_dir)
         ],
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        text=True,
+        stdout=log_file,
+        stderr=subprocess.STDOUT
     )
 
-    if not wait_controller(controller_port):
+    ok, error = wait_controller(
+        controller_port,
+        process,
+        MIHOMO_STARTUP_TIMEOUT
+    )
+
+    if not ok:
         process.terminate()
+
         try:
             process.wait(timeout=1)
-        except Exception:
+        except subprocess.TimeoutExpired:
             process.kill()
 
-        log.close()
+        log_file.close()
 
         return None, {
             "success": False,
-            "reason": "mihomo_controller_timeout",
-            "elapsed": time.monotonic() - start,
+            "reason": error,
+            "startup_time": time.monotonic() - start_time
         }
 
-    if not wait_proxy(proxy_port):
+    ok, error = wait_proxy_port(
+        proxy_port,
+        process,
+        MIHOMO_STARTUP_TIMEOUT
+    )
+
+    if not ok:
         process.terminate()
+
         try:
             process.wait(timeout=1)
-        except Exception:
+        except subprocess.TimeoutExpired:
             process.kill()
 
-        log.close()
+        log_file.close()
 
         return None, {
             "success": False,
-            "reason": "mihomo_proxy_not_ready",
-            "elapsed": time.monotonic() - start,
+            "reason": error,
+            "startup_time": time.monotonic() - start_time
         }
 
-    return {
-        "process": process,
-        "log": log,
-        "temp_dir": temp_dir,
-    }, {
+    startup_time = time.monotonic() - start_time
+
+    return (process, log_file), {
         "success": True,
-        "elapsed": time.monotonic() - start,
+        "startup_time": startup_time
     }
 
 
-def stop_mihomo(instance):
-    if instance is None:
-        return
-
-    process = instance["process"]
-    log = instance["log"]
-
-    try:
-        process.terminate()
-        process.wait(timeout=1)
-    except Exception:
-        try:
-            process.kill()
-        except Exception:
-            pass
-
-    try:
-        log.close()
-    except Exception:
-        pass
-
+# ============================================================
+# YouTube page test
+# ============================================================
 
 def test_youtube(proxy_port):
+    proxy = "http://127.0.0.1:" + str(proxy_port)
+
     proxies = {
-        "http": f"http://127.0.0.1:{proxy_port}",
-        "https": f"http://127.0.0.1:{proxy_port}",
+        "http": proxy,
+        "https": proxy
     }
 
     start = time.monotonic()
-    ttfb = None
-    total_bytes = 0
 
     try:
         response = requests.get(
             YOUTUBE_URL,
             proxies=proxies,
-            timeout=(STAGE_TIMEOUT, STAGE_TIMEOUT),
             stream=True,
+            timeout=(STAGE_TIMEOUT, STAGE_TIMEOUT),
             headers={
                 "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 Chrome/131 Safari/537.36"
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/153.0 Safari/537.36"
                 )
-            },
+            }
         )
 
-        ttfb = time.monotonic() - start
+        first_byte_time = time.monotonic()
+
+        bytes_read = 0
 
         for chunk in response.iter_content(chunk_size=65536):
             if chunk:
-                total_bytes += len(chunk)
+                bytes_read += len(chunk)
 
-            if time.monotonic() - start >= STAGE_TIMEOUT:
-                break
+                if bytes_read >= 256 * 1024:
+                    break
 
+        elapsed = time.monotonic() - start
+        ttfb = first_byte_time - start
+
+        status = response.status_code
+
+        response.close()
+
+        if status != 200:
+            return {
+                "success": False,
+                "reason": "http_status_" + str(status),
+                "elapsed": elapsed,
+                "ttfb": ttfb,
+                "bytes": bytes_read
+            }
+
+        return {
+            "success": True,
+            "elapsed": elapsed,
+            "ttfb": ttfb,
+            "bytes": bytes_read
+        }
+
+    except requests.RequestException as e:
         elapsed = time.monotonic() - start
 
         return {
-            "success": response.status_code == 200,
-            "status": response.status_code,
-            "elapsed": elapsed,
-            "ttfb": ttfb,
-            "bytes": total_bytes,
-            "error": None,
-        }
-
-    except Exception as e:
-        return {
             "success": False,
-            "status": None,
-            "elapsed": time.monotonic() - start,
-            "ttfb": ttfb,
-            "bytes": total_bytes,
-            "error": type(e).__name__ + ": " + str(e),
+            "reason": type(e).__name__ + ": " + str(e),
+            "elapsed": elapsed
         }
 
+
+# ============================================================
+# yt-dlp media URL extraction
+# ============================================================
 
 def extract_media_url(proxy_port):
-    start = time.monotonic()
-
-    env = os.environ.copy()
-    env["HTTP_PROXY"] = f"http://127.0.0.1:{proxy_port}"
-    env["HTTPS_PROXY"] = f"http://127.0.0.1:{proxy_port}"
-    env["ALL_PROXY"] = f"http://127.0.0.1:{proxy_port}"
+    proxy = "http://127.0.0.1:" + str(proxy_port)
 
     command = [
         "yt-dlp",
+
         "--proxy",
-        f"http://127.0.0.1:{proxy_port}",
-        "--no-warnings",
+        proxy,
+
         "--no-playlist",
+
         "-g",
+
         "-f",
-        "bestvideo[height<=1080]/best[height<=1080]",
-        YOUTUBE_URL,
+        (
+            "bestvideo[height<=1080]"
+            "/best[height<=1080]"
+        ),
+
+        YOUTUBE_URL
     ]
+
+    env = os.environ.copy()
+
+    env["HTTP_PROXY"] = proxy
+    env["HTTPS_PROXY"] = proxy
+    env["ALL_PROXY"] = proxy
+
+    start = time.monotonic()
 
     try:
         result = subprocess.run(
@@ -280,252 +360,439 @@ def extract_media_url(proxy_port):
             capture_output=True,
             text=True,
             timeout=STAGE_TIMEOUT,
-            env=env,
+            env=env
         )
 
+    except subprocess.TimeoutExpired:
         elapsed = time.monotonic() - start
 
-        if result.returncode != 0:
-            return {
-                "success": False,
-                "elapsed": elapsed,
-                "url": None,
-                "error": result.stderr[-1000:],
-            }
-
-        url = result.stdout.strip().splitlines()[0]
-
-        return {
-            "success": True,
-            "elapsed": elapsed,
-            "url": url,
-            "error": None,
-        }
-
-    except subprocess.TimeoutExpired:
         return {
             "success": False,
-            "elapsed": time.monotonic() - start,
-            "url": None,
-            "error": "yt_dlp_timeout",
+            "reason": "yt_dlp_timeout",
+            "elapsed": elapsed
         }
 
-    except Exception as e:
+    elapsed = time.monotonic() - start
+
+    if result.returncode != 0:
+        error_text = result.stderr.strip()
+
+        if len(error_text) > 1000:
+            error_text = error_text[-1000:]
+
         return {
             "success": False,
-            "elapsed": time.monotonic() - start,
-            "url": None,
-            "error": type(e).__name__ + ": " + str(e),
+            "reason": "yt_dlp_error",
+            "error": error_text,
+            "elapsed": elapsed
         }
 
+    urls = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+    if not urls:
+        return {
+            "success": False,
+            "reason": "yt_dlp_empty_output",
+            "elapsed": elapsed
+        }
+
+    media_url = urls[0]
+
+    return {
+        "success": True,
+        "elapsed": elapsed,
+        "url": media_url
+    }
+
+
+# ============================================================
+# Real YouTube media download
+#
+# Classification:
+#
+# complete = downloaded 1 MiB
+# partial  = downloaded >0 bytes but did not reach 1 MiB
+# failed   = 0 bytes / transport error
+# ============================================================
 
 def download_media(media_url, proxy_port):
+    proxy = "http://127.0.0.1:" + str(proxy_port)
+
     proxies = {
-        "http": f"http://127.0.0.1:{proxy_port}",
-        "https": f"http://127.0.0.1:{proxy_port}",
+        "http": proxy,
+        "https": proxy
+    }
+
+    headers = {
+        "Range": "bytes=0-" + str(MAX_DOWNLOAD_BYTES - 1),
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/153.0 Safari/537.36"
+        )
     }
 
     start = time.monotonic()
-    first_byte = None
-    total = 0
+    ttfb = None
+    bytes_read = 0
 
     try:
         response = requests.get(
             media_url,
             proxies=proxies,
-            timeout=(STAGE_TIMEOUT, STAGE_TIMEOUT),
+            headers=headers,
             stream=True,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Range": f"bytes=0-{MAX_DOWNLOAD_BYTES - 1}",
-            },
+            timeout=(STAGE_TIMEOUT, STAGE_TIMEOUT)
         )
 
+        first_chunk = True
+
         for chunk in response.iter_content(chunk_size=65536):
+
+            now = time.monotonic()
+
+            if first_chunk:
+                ttfb = now - start
+                first_chunk = False
+
             if not chunk:
                 continue
 
-            if first_byte is None:
-                first_byte = time.monotonic()
-
-            remaining = MAX_DOWNLOAD_BYTES - total
+            remaining = MAX_DOWNLOAD_BYTES - bytes_read
 
             if len(chunk) > remaining:
                 chunk = chunk[:remaining]
 
-            total += len(chunk)
+            bytes_read += len(chunk)
 
-            if total >= MAX_DOWNLOAD_BYTES:
+            if bytes_read >= MAX_DOWNLOAD_BYTES:
                 break
 
-            if time.monotonic() - start >= STAGE_TIMEOUT:
+            if now - start >= STAGE_TIMEOUT:
                 break
 
         elapsed = time.monotonic() - start
 
-        if total > 0:
-            throughput = total * 8 / elapsed / 1000000
-            valid = True
+        response.close()
+
+        if bytes_read >= MAX_DOWNLOAD_BYTES:
+            status = "complete"
+
+        elif bytes_read > 0:
+            status = "partial"
+
         else:
-            throughput = 0
-            valid = False
+            status = "failed"
+
+        throughput_mbps = 0.0
+
+        if elapsed > 0:
+            throughput_mbps = (
+                bytes_read * 8 / elapsed / 1000000
+            )
 
         return {
-            "success": response.status_code in (200, 206),
-            "status": response.status_code,
+            "success": bytes_read > 0,
+            "status": status,
+            "bytes": bytes_read,
             "elapsed": elapsed,
-            "ttfb": (
-                first_byte - start
-                if first_byte is not None
-                else None
-            ),
-            "bytes": total,
-            "throughput_mbps": throughput,
-            "measurement_valid": valid,
-            "error": None,
+            "ttfb": ttfb,
+            "throughput_mbps": throughput_mbps
         }
 
-    except Exception as e:
+    except requests.RequestException as e:
+        elapsed = time.monotonic() - start
+
+        throughput_mbps = 0.0
+
+        if elapsed > 0:
+            throughput_mbps = (
+                bytes_read * 8 / elapsed / 1000000
+            )
+
         return {
-            "success": False,
-            "status": None,
-            "elapsed": time.monotonic() - start,
-            "ttfb": None,
-            "bytes": total,
-            "throughput_mbps": 0,
-            "measurement_valid": False,
-            "error": type(e).__name__ + ": " + str(e),
+            "success": bytes_read > 0,
+            "status": "failed" if bytes_read == 0 else "partial",
+            "bytes": bytes_read,
+            "elapsed": elapsed,
+            "ttfb": ttfb,
+            "throughput_mbps": throughput_mbps,
+            "error": type(e).__name__ + ": " + str(e)
         }
 
+
+# ============================================================
+# Test one node
+# ============================================================
 
 def test_node(index, node):
-    proxy_port = 20000 + index
-    controller_port = 21000 + index
+    node_name = node.get("name", "UNKNOWN")
+    protocol = node.get("type", "UNKNOWN")
 
-    name = node.get("name", f"node-{index}")
-    node_type = node.get("type", "unknown")
+    proxy_port = BASE_PROXY_PORT + index
+    controller_port = BASE_CONTROLLER_PORT + index
 
-    print(f"[{index + 1}/{MAX_NODES}] TEST {name}", flush=True)
+    print(
+        "[%d] TEST %s"
+        % (index + 1, node_name),
+        flush=True
+    )
 
     result = {
-        "index": index,
-        "name": name,
-        "type": node_type,
+        "index": index + 1,
+        "name": node_name,
+        "type": protocol,
+        "proxy_port": proxy_port,
+        "controller_port": controller_port,
         "startup": {},
         "youtube": {},
         "yt_dlp": {},
         "media": {},
-        "measurement_valid": False,
-        "failure_reason": None,
+        "success": False
     }
 
-    instance, startup = start_mihomo(
-        node,
-        proxy_port,
-        controller_port,
+    config_dir = Path(
+        tempfile.mkdtemp(
+            prefix="free_nodes_%d_" % index
+        )
     )
 
-    result["startup"] = startup
-
-    if instance is None:
-        result["failure_reason"] = startup["reason"]
-        print(
-            f"    FAIL | {startup['reason']}",
-            flush=True,
-        )
-        return result
+    mihomo = None
 
     try:
-        youtube = test_youtube(proxy_port)
-        result["youtube"] = youtube
+        # ----------------------------------------------------
+        # STEP 0
+        # ----------------------------------------------------
 
-        if not youtube["success"]:
-            result["failure_reason"] = "youtube_page_failed"
+        mihomo, startup = start_mihomo(
+            node,
+            proxy_port,
+            controller_port,
+            config_dir
+        )
+
+        result["startup"] = startup
+
+        if not startup.get("success"):
             print(
-                f"    FAIL | YouTube | {youtube['error']}",
-                flush=True,
+                "    FAIL | %s"
+                % startup.get("reason"),
+                flush=True
             )
+
+            result["reason"] = startup.get("reason")
+
             return result
 
         print(
-            f"    YouTube OK | "
-            f"{youtube['elapsed']:.2f}s | "
-            f"TTFB {youtube['ttfb']:.2f}s",
-            flush=True,
+            "    Mihomo READY | %.3fs"
+            % startup.get("startup_time", 0),
+            flush=True
         )
+
+        # ----------------------------------------------------
+        # STEP 1
+        # ----------------------------------------------------
+
+        youtube = test_youtube(proxy_port)
+
+        result["youtube"] = youtube
+
+        if not youtube.get("success"):
+            print(
+                "    FAIL | YouTube | %s"
+                % youtube.get("reason"),
+                flush=True
+            )
+
+            result["reason"] = "youtube_page_failed"
+
+            return result
+
+        print(
+            "    YouTube OK | %.2fs | TTFB %.2fs"
+            % (
+                youtube.get("elapsed", 0),
+                youtube.get("ttfb", 0)
+            ),
+            flush=True
+        )
+
+        # ----------------------------------------------------
+        # STEP 2
+        # ----------------------------------------------------
 
         extraction = extract_media_url(proxy_port)
 
-        result["yt_dlp"] = {
-            k: v for k, v in extraction.items()
-            if k != "url"
-        }
+        result["yt_dlp"] = extraction
 
-        if not extraction["success"]:
-            result["failure_reason"] = "yt_dlp_failed"
+        if not extraction.get("success"):
             print(
-                f"    FAIL | yt-dlp | {extraction['error']}",
-                flush=True,
+                "    FAIL | yt-dlp | %s"
+                % extraction.get("reason"),
+                flush=True
             )
+
+            result["reason"] = extraction.get("reason")
+
             return result
 
         print(
-            f"    yt-dlp OK | "
-            f"{extraction['elapsed']:.2f}s",
-            flush=True,
+            "    yt-dlp OK | %.2fs"
+            % extraction.get("elapsed", 0),
+            flush=True
         )
+
+        media_url = extraction.get("url", "")
+
+        # Record whether the media URL contains an IPv6-looking
+        # ip= parameter. This is diagnostic only.
+        result["media"]["url_has_ipv6_ip_parameter"] = (
+            "ip=" in media_url
+            and ":" in media_url.split("ip=", 1)[1].split("&", 1)[0]
+        )
+
+        # ----------------------------------------------------
+        # STEP 3
+        # ----------------------------------------------------
 
         media = download_media(
-            extraction["url"],
-            proxy_port,
+            media_url,
+            proxy_port
         )
 
-        result["media"] = media
-        result["measurement_valid"] = media["measurement_valid"]
+        result["media"].update(media)
 
-        if media["measurement_valid"]:
-            result["failure_reason"] = None
+        status = media.get("status")
 
+        if status == "complete":
             print(
-                f"    MEDIA OK | "
-                f"{media['bytes']} bytes | "
-                f"{media['throughput_mbps']:.2f} Mbps",
-                flush=True,
+                "    MEDIA COMPLETE | %d bytes | %.2f Mbps"
+                % (
+                    media.get("bytes", 0),
+                    media.get("throughput_mbps", 0)
+                ),
+                flush=True
             )
+
+            result["success"] = True
+            result["reason"] = "media_complete"
+
+        elif status == "partial":
+            print(
+                "    MEDIA PARTIAL | %d bytes | %.2f Mbps"
+                % (
+                    media.get("bytes", 0),
+                    media.get("throughput_mbps", 0)
+                ),
+                flush=True
+            )
+
+            # Partial media is useful data, but is not considered
+            # a fully successful node.
+            result["success"] = False
+            result["reason"] = "media_partial"
+
         else:
-            result["failure_reason"] = "media_failed"
-
             print(
-                f"    FAIL | Media | {media['error']}",
-                flush=True,
+                "    MEDIA FAILED | %s"
+                % media.get("error", "no_data"),
+                flush=True
             )
+
+            result["success"] = False
+            result["reason"] = "media_failed"
+
+        return result
+
+    except Exception as e:
+        result["success"] = False
+        result["reason"] = (
+            type(e).__name__ + ": " + str(e)
+        )
+
+        print(
+            "    FAIL | INTERNAL | %s"
+            % result["reason"],
+            flush=True
+        )
 
         return result
 
     finally:
-        stop_mihomo(instance)
+        # ----------------------------------------------------
+        # Stop Mihomo
+        # ----------------------------------------------------
 
+        if mihomo is not None:
+            process, log_file = mihomo
+
+            try:
+                process.terminate()
+                process.wait(timeout=1)
+
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                    process.wait(timeout=1)
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
+            try:
+                log_file.close()
+            except Exception:
+                pass
+
+
+# ============================================================
+# Main
+# ============================================================
 
 def main():
-    start = time.monotonic()
+    print("=" * 60)
+    print("free-nodes diagnostic test")
+    print("=" * 60)
 
-    if not MIHOMO.exists():
-        raise FileNotFoundError(
-            f"Mihomo binary not found: {MIHOMO}"
+    if not MIHOMO_BIN.exists():
+        raise RuntimeError(
+            "Mihomo binary not found: %s"
+            % MIHOMO_BIN
         )
 
-    nodes = load_candidates()
+    candidates = load_candidates()
 
-    print()
-    print("======================================")
-    print("free-nodes diagnostic test")
-    print("======================================")
-    print(f"Candidates: {len(nodes)}")
-    print(f"Concurrency: {CONCURRENCY}")
-    print(f"Stage timeout: {STAGE_TIMEOUT}s")
-    print(f"Max media download: {MAX_DOWNLOAD_BYTES} bytes")
-    print("======================================")
-    print()
+    print(
+        "Candidates: %d"
+        % len(candidates)
+    )
+
+    print(
+        "Concurrency: %d"
+        % CONCURRENCY
+    )
+
+    print(
+        "Stage timeout: %.0fs"
+        % STAGE_TIMEOUT
+    )
+
+    print(
+        "Max media download: %d bytes"
+        % MAX_DOWNLOAD_BYTES
+    )
+
+    print("=" * 60)
+
+    overall_start = time.monotonic()
 
     results = []
 
@@ -533,92 +800,155 @@ def main():
         max_workers=CONCURRENCY
     ) as executor:
 
-        futures = [
-            executor.submit(test_node, i, node)
-            for i, node in enumerate(nodes)
-        ]
+        futures = {}
 
-        for future in futures:
-            results.append(future.result())
+        for index, node in enumerate(candidates):
+            future = executor.submit(
+                test_node,
+                index,
+                node
+            )
 
-    summary = {
-        "mihomo_startup_success": sum(
-            1
-            for r in results
-            if r.get("startup", {}).get("success")
-        ),
-        "youtube_success": sum(
-            1
-            for r in results
-            if r.get("youtube", {}).get("success")
-        ),
-        "yt_dlp_success": sum(
-            1
-            for r in results
-            if r.get("yt_dlp", {}).get("success")
-        ),
-        "media_measurement_valid": sum(
-            1
-            for r in results
-            if r.get("measurement_valid")
-        ),
-    }
+            futures[future] = index
+
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+
+    results.sort(
+        key=lambda x: x.get("index", 0)
+    )
+
+    elapsed = time.monotonic() - overall_start
+
+    startup_success = sum(
+        1
+        for r in results
+        if r.get("startup", {}).get("success")
+    )
+
+    youtube_success = sum(
+        1
+        for r in results
+        if r.get("youtube", {}).get("success")
+    )
+
+    ytdlp_success = sum(
+        1
+        for r in results
+        if r.get("yt_dlp", {}).get("success")
+    )
+
+    media_complete = sum(
+        1
+        for r in results
+        if r.get("media", {}).get("status") == "complete"
+    )
+
+    media_partial = sum(
+        1
+        for r in results
+        if r.get("media", {}).get("status") == "partial"
+    )
+
+    media_failed = sum(
+        1
+        for r in results
+        if r.get("media", {}).get("status") == "failed"
+    )
 
     output = {
         "generated_at": time.strftime(
             "%Y-%m-%dT%H:%M:%SZ",
-            time.gmtime(),
+            time.gmtime()
         ),
-        "candidates": len(nodes),
+        "candidates": len(candidates),
         "tested": len(results),
-        "elapsed_seconds": time.monotonic() - start,
-        "summary": summary,
-        "results": results,
+        "elapsed_seconds": elapsed,
+
+        "summary": {
+            "mihomo_startup_success": startup_success,
+            "youtube_success": youtube_success,
+            "yt_dlp_success": ytdlp_success,
+            "media_complete": media_complete,
+            "media_partial": media_partial,
+            "media_failed": media_failed
+        },
+
+        "results": results
     }
 
     RESULT_FILE.parent.mkdir(
         parents=True,
-        exist_ok=True,
+        exist_ok=True
     )
 
     with open(
         RESULT_FILE,
         "w",
-        encoding="utf-8",
+        encoding="utf-8"
     ) as f:
         json.dump(
             output,
             f,
             ensure_ascii=False,
-            indent=2,
+            indent=2
         )
 
     print()
-    print("========== SUMMARY ==========")
-    print(f"Candidates: {len(nodes)}")
-    print(f"Tested: {len(results)}")
+    print("=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+
     print(
-        "Mihomo startup success:",
-        summary["mihomo_startup_success"],
+        "Candidates: %d"
+        % len(candidates)
     )
+
     print(
-        "YouTube page success:",
-        summary["youtube_success"],
+        "Tested: %d"
+        % len(results)
     )
+
     print(
-        "yt-dlp success:",
-        summary["yt_dlp_success"],
+        "Mihomo startup success: %d"
+        % startup_success
     )
+
     print(
-        "Media measurement valid:",
-        summary["media_measurement_valid"],
+        "YouTube page success: %d"
+        % youtube_success
     )
+
     print(
-        f"Elapsed: {output['elapsed_seconds']:.1f}s"
+        "yt-dlp success: %d"
+        % ytdlp_success
     )
-    print(f"Results: {RESULT_FILE}")
-    print("==============================")
-    print()
+
+    print(
+        "Media complete: %d"
+        % media_complete
+    )
+
+    print(
+        "Media partial: %d"
+        % media_partial
+    )
+
+    print(
+        "Media failed: %d"
+        % media_failed
+    )
+
+    print(
+        "Elapsed: %.1fs"
+        % elapsed
+    )
+
+    print(
+        "Results: %s"
+        % RESULT_FILE
+    )
 
 
 if __name__ == "__main__":
