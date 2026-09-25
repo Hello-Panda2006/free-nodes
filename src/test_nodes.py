@@ -16,7 +16,7 @@ RESULT_FILE = ROOT / "data" / "test-results.json"
 MIHOMO = ROOT / "bin" / "mihomo"
 
 MAX_NODES = 20
-CONCURRENCY = 1
+CONCURRENCY = 5
 
 STAGE_TIMEOUT = 3
 MIHOMO_STARTUP_TIMEOUT = 5
