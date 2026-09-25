@@ -42,12 +42,18 @@ jobs:
 
           ./bin/mihomo -v
 
-      - name: Test all node
+      - name: Test all nodes
         run: |
           python src/test_nodes.py
-          
-      - name: Upload test results
+
+      - name: Select fastest free nodes
+        run: |
+          python src/select_nodes.py
+
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
-          path: data/test-results.json 
+          name: free-node-results
+          path: |
+            data/test-results.json
+            data/free-nodes.yaml
