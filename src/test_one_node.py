@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import signal
 import shutil
 import tempfile
 import subprocess
@@ -16,20 +15,23 @@ MIHOMO_BIN = "./bin/mihomo"
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 7890
 
-TEST_VIDEO_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+TEST_VIDEO_URL = (
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+)
 
 STAGE_TIMEOUT = 3.0
 MAX_DOWNLOAD_BYTES = 1024 * 1024
 
 
-class StageTimeout(Exception):
-    pass
-
-
-def timeout_handler(signum, frame):
-    raise StageTimeout(
-        f"Stage exceeded {STAGE_TIMEOUT:.1f} seconds"
-    )
+def proxy_dict():
+    return {
+        "http": (
+            f"http://{PROXY_HOST}:{PROXY_PORT}"
+        ),
+        "https": (
+            f"http://{PROXY_HOST}:{PROXY_PORT}"
+        ),
+    }
 
 
 def load_first_node():
@@ -40,7 +42,10 @@ def load_first_node():
             "data/candidates.yaml not found"
         )
 
-    with path.open("r", encoding="utf-8") as f:
+    with path.open(
+        "r",
+        encoding="utf-8"
+    ) as f:
         data = yaml.safe_load(f)
 
     nodes = data.get("proxies", [])
@@ -53,7 +58,10 @@ def load_first_node():
     return nodes[0]
 
 
-def build_mihomo_config(node, config_path):
+def build_mihomo_config(
+    node,
+    config_path
+):
     config = {
         "mixed-port": PROXY_PORT,
         "allow-lan": False,
@@ -89,45 +97,21 @@ def build_mihomo_config(node, config_path):
             config,
             f,
             allow_unicode=True,
-            sort_keys=False,
+            sort_keys=False
         )
-
-
-def run_with_timeout(func, timeout):
-    signal.setitimer(
-        signal.ITIMER_REAL,
-        timeout,
-    )
-
-    try:
-        return func()
-
-    finally:
-        signal.setitimer(
-            signal.ITIMER_REAL,
-            0,
-        )
-
-
-def proxy_dict():
-    return {
-        "http": (
-            f"http://{PROXY_HOST}:{PROXY_PORT}"
-        ),
-        "https": (
-            f"http://{PROXY_HOST}:{PROXY_PORT}"
-        ),
-    }
 
 
 def wait_for_mihomo():
-    deadline = time.monotonic() + STAGE_TIMEOUT
+    deadline = (
+        time.monotonic()
+        + STAGE_TIMEOUT
+    )
 
     while time.monotonic() < deadline:
 
         try:
             response = requests.get(
-                "http://www.youtube.com/",
+                "https://www.youtube.com/",
                 proxies=proxy_dict(),
                 timeout=0.3,
             )
@@ -140,12 +124,13 @@ def wait_for_mihomo():
 
         time.sleep(0.05)
 
-    raise StageTimeout(
+    raise TimeoutError(
         "Mihomo proxy did not become ready"
     )
 
 
 def test_youtube_page():
+
     start = time.monotonic()
 
     response = requests.get(
@@ -154,11 +139,14 @@ def test_youtube_page():
         timeout=STAGE_TIMEOUT,
     )
 
-    elapsed = time.monotonic() - start
+    elapsed = (
+        time.monotonic()
+        - start
+    )
 
     if response.status_code != 200:
         raise RuntimeError(
-            f"YouTube returned HTTP "
+            "YouTube returned HTTP "
             f"{response.status_code}"
         )
 
@@ -170,6 +158,7 @@ def test_youtube_page():
 
 
 def extract_media_url():
+
     ytdlp = shutil.which("yt-dlp")
 
     if not ytdlp:
@@ -177,18 +166,11 @@ def extract_media_url():
             "yt-dlp executable not found"
         )
 
-    # 固定在 1080p 以下。
-    #
-    # 优先：
-    #   1. VP9
-    #   2. AVC1
-    #   3. 其他编码
-    #
-    # 不使用 4K，避免节点之间因为格式差异
-    # 导致测速结果不可比较。
     format_selector = (
-        "bestvideo[height<=1080][vcodec^=vp9]/"
-        "bestvideo[height<=1080][vcodec^=avc1]/"
+        "bestvideo[height<=1080]"
+        "[vcodec^=vp9]/"
+        "bestvideo[height<=1080]"
+        "[vcodec^=avc1]/"
         "bestvideo[height<=1080]"
     )
 
@@ -222,7 +204,10 @@ def extract_media_url():
         timeout=STAGE_TIMEOUT,
     )
 
-    elapsed = time.monotonic() - start
+    elapsed = (
+        time.monotonic()
+        - start
+    )
 
     if result.returncode != 0:
         raise RuntimeError(
@@ -248,6 +233,7 @@ def extract_media_url():
 
 
 def download_media(media_url):
+
     start = time.monotonic()
 
     response = requests.get(
@@ -259,7 +245,10 @@ def download_media(media_url):
 
     response.raise_for_status()
 
-    ttfb = time.monotonic() - start
+    ttfb = (
+        time.monotonic()
+        - start
+    )
 
     downloaded = 0
 
@@ -290,7 +279,7 @@ def download_media(media_url):
             - download_start
             > STAGE_TIMEOUT
         ):
-            raise StageTimeout(
+            raise TimeoutError(
                 "Media download exceeded "
                 f"{STAGE_TIMEOUT:.1f} seconds"
             )
@@ -301,9 +290,9 @@ def download_media(media_url):
     )
 
     if downloaded < MAX_DOWNLOAD_BYTES:
-        raise StageTimeout(
-            f"Only downloaded {downloaded:,} "
-            "bytes before timeout"
+        raise TimeoutError(
+            "Only downloaded "
+            f"{downloaded:,} bytes before timeout"
         )
 
     throughput_mbps = (
@@ -321,14 +310,14 @@ def download_media(media_url):
     }
 
 
-def main():
+def worker():
+
+    node = load_first_node()
 
     print(
         "free-nodes - single YouTube media test"
     )
     print()
-
-    node = load_first_node()
 
     print(
         f"Node name: {node['name']}"
@@ -345,7 +334,7 @@ def main():
     )
 
     print(
-        f"Maximum media download: "
+        f"Maximum download: "
         f"{MAX_DOWNLOAD_BYTES:,} bytes"
     )
 
@@ -355,64 +344,65 @@ def main():
 
     config_path = os.path.join(
         temp_dir,
-        "config.yaml",
+        "config.yaml"
     )
 
-    build_mihomo_config(
-        node,
-        config_path,
-    )
-
-    print(
-        f"Temporary config: {config_path}"
-    )
-
-    print("Starting Mihomo...")
-
-    process = subprocess.Popen(
-        [
-            MIHOMO_BIN,
-            "-d",
-            temp_dir,
-            "-f",
-            config_path,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-    total_start = time.monotonic()
+    process = None
 
     try:
 
-        # --------------------------------------------------
-        # Mihomo
-        # --------------------------------------------------
+        build_mihomo_config(
+            node,
+            config_path
+        )
+
+        print(
+            f"Temporary config: "
+            f"{config_path}"
+        )
+
+        print(
+            "Starting Mihomo..."
+        )
+
+        process = subprocess.Popen(
+            [
+                MIHOMO_BIN,
+                "-d",
+                temp_dir,
+                "-f",
+                config_path,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # ------------------------------------------
+        # STEP 0
+        # ------------------------------------------
 
         print()
-        print("STEP 0: Mihomo startup")
-
-        run_with_timeout(
-            wait_for_mihomo,
-            STAGE_TIMEOUT,
+        print(
+            "STEP 0: Mihomo startup"
         )
+
+        wait_for_mihomo()
 
         print(
             "Mihomo proxy is ready: "
             f"{PROXY_HOST}:{PROXY_PORT}"
         )
 
-        # --------------------------------------------------
+        # ------------------------------------------
         # STEP 1
-        # --------------------------------------------------
+        # ------------------------------------------
 
         print()
-        print("STEP 1: YouTube page")
-
-        page = run_with_timeout(
-            test_youtube_page,
-            STAGE_TIMEOUT,
+        print(
+            "STEP 1: YouTube page"
         )
+
+        page = test_youtube_page()
 
         print(
             f"HTTP status: "
@@ -433,9 +423,9 @@ def main():
             "YouTube page test: SUCCESS"
         )
 
-        # --------------------------------------------------
+        # ------------------------------------------
         # STEP 2
-        # --------------------------------------------------
+        # ------------------------------------------
 
         print()
         print(
@@ -443,10 +433,7 @@ def main():
             "yt-dlp media extraction"
         )
 
-        media = run_with_timeout(
-            extract_media_url,
-            STAGE_TIMEOUT,
-        )
+        media = extract_media_url()
 
         print(
             f"Extraction elapsed: "
@@ -457,9 +444,9 @@ def main():
             "yt-dlp extraction: SUCCESS"
         )
 
-        # --------------------------------------------------
+        # ------------------------------------------
         # STEP 3
-        # --------------------------------------------------
+        # ------------------------------------------
 
         print()
         print(
@@ -472,11 +459,8 @@ def main():
             f"{MAX_DOWNLOAD_BYTES:,} bytes"
         )
 
-        download = run_with_timeout(
-            lambda: download_media(
-                media["url"]
-            ),
-            STAGE_TIMEOUT,
+        download = download_media(
+            media["url"]
         )
 
         print(
@@ -491,8 +475,7 @@ def main():
 
         print(
             f"Download time: "
-            f"{download['download_time']:.3f} "
-            "seconds"
+            f"{download['download_time']:.3f} seconds"
         )
 
         print(
@@ -504,130 +487,104 @@ def main():
             "Media download: SUCCESS"
         )
 
-        # --------------------------------------------------
-        # FINAL
-        # --------------------------------------------------
+        return 0
 
-        total_elapsed = (
-            time.monotonic()
-            - total_start
+    finally:
+
+        if process is not None:
+
+            process.terminate()
+
+            try:
+                process.wait(
+                    timeout=2
+                )
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+        shutil.rmtree(
+            temp_dir,
+            ignore_errors=True
         )
 
-        print()
-        print("FINAL RESULT")
 
-        print(
-            f"Node:             "
-            f"{node['name']}"
-        )
+def main():
 
-        print(
-            f"Protocol:         "
-            f"{node.get('type', 'unknown')}"
-        )
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--worker":
+            return worker()
 
-        print(
-            f"Total test time:  "
-            f"{total_elapsed:.3f}s"
-        )
+    # ----------------------------------------------
+    # Parent process
+    # ----------------------------------------------
 
-        print(
-            f"YouTube page:     "
-            f"SUCCESS ({page['elapsed']:.3f}s)"
-        )
+    print(
+        "Starting single-node worker..."
+    )
 
-        print(
-            f"yt-dlp:           "
-            f"SUCCESS ({media['elapsed']:.3f}s)"
-        )
+    command = [
+        sys.executable,
+        __file__,
+        "--worker"
+    ]
 
-        print(
-            f"Media download:   "
-            f"SUCCESS"
-        )
+    start = time.monotonic()
 
-        print(
-            f"Media TTFB:       "
-            f"{download['ttfb']:.3f}s"
-        )
+    process = subprocess.Popen(
+        command
+    )
 
-        print(
-            f"Media throughput: "
-            f"{download['throughput_mbps']:.2f} Mbps"
+    try:
+
+        process.wait(
+            timeout=(
+                STAGE_TIMEOUT * 3
+                + 5
+            )
         )
 
     except subprocess.TimeoutExpired:
 
         print()
-        print("FINAL RESULT")
         print(
-            f"Node:             "
-            f"{node['name']}"
+            "FINAL RESULT"
         )
         print(
-            f"Protocol:         "
-            f"{node.get('type', 'unknown')}"
-        )
-        print("Result:            TIMEOUT")
-        print(
-            "Reason:            "
-            "Stage exceeded 3 seconds"
-        )
-
-        sys.exit(1)
-
-    except StageTimeout as e:
-
-        print()
-        print("FINAL RESULT")
-        print(
-            f"Node:             "
-            f"{node['name']}"
+            "Result: TIMEOUT"
         )
         print(
-            f"Protocol:         "
-            f"{node.get('type', 'unknown')}"
+            "Reason: Worker exceeded "
+            "maximum allowed runtime"
         )
-        print("Result:            TIMEOUT")
-        print(
-            f"Reason:            {e}"
-        )
-
-        sys.exit(1)
-
-    except Exception as e:
-
-        print()
-        print("FINAL RESULT")
-        print(
-            f"Node:             "
-            f"{node['name']}"
-        )
-        print(
-            f"Protocol:         "
-            f"{node.get('type', 'unknown')}"
-        )
-        print("Result:            FAILED")
-        print(
-            f"Reason:            {e}"
-        )
-
-        sys.exit(1)
-
-    finally:
 
         process.terminate()
 
         try:
-            process.wait(timeout=2)
+            process.wait(
+                timeout=2
+            )
         except subprocess.TimeoutExpired:
             process.kill()
 
-        shutil.rmtree(
-            temp_dir,
-            ignore_errors=True,
-        )
+        return 1
+
+    elapsed = (
+        time.monotonic()
+        - start
+    )
+
+    print()
+    print(
+        "Worker finished."
+    )
+
+    print(
+        f"Total elapsed: "
+        f"{elapsed:.3f}s"
+    )
+
+    return process.returncode
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
