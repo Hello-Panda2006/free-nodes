@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import yaml
 import signal
 import shutil
 import tempfile
@@ -9,32 +8,37 @@ import subprocess
 from pathlib import Path
 
 import requests
+import yaml
 
 
-Mihomo_BIN = "./bin/mihomo"
+MIHOMO_BIN = "./bin/mihomo"
 
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 7890
 
 TEST_VIDEO_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
-MAX_TOTAL_SECONDS = 3.0
+STAGE_TIMEOUT = 3.0
 MAX_DOWNLOAD_BYTES = 1024 * 1024
 
 
-class TestTimeout(Exception):
+class StageTimeout(Exception):
     pass
 
 
 def timeout_handler(signum, frame):
-    raise TestTimeout("Node test exceeded 3 seconds")
+    raise StageTimeout(
+        f"Stage exceeded {STAGE_TIMEOUT:.1f} seconds"
+    )
 
 
 def load_first_node():
     path = Path("data/candidates.yaml")
 
     if not path.exists():
-        raise RuntimeError("data/candidates.yaml not found")
+        raise RuntimeError(
+            "data/candidates.yaml not found"
+        )
 
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
@@ -42,7 +46,9 @@ def load_first_node():
     nodes = data.get("proxies", [])
 
     if not nodes:
-        raise RuntimeError("No proxy nodes found")
+        raise RuntimeError(
+            "No proxy nodes found"
+        )
 
     return nodes[0]
 
@@ -55,81 +61,131 @@ def build_mihomo_config(node, config_path):
         "log-level": "warning",
         "ipv6": False,
 
-        "proxies": [node],
+        "proxies": [
+            node
+        ],
 
         "proxy-groups": [
             {
                 "name": "TEST",
                 "type": "select",
-                "proxies": [node["name"]],
+                "proxies": [
+                    node["name"]
+                ],
             }
         ],
 
         "rules": [
             "MATCH,TEST"
-        ]
+        ],
     }
 
-    with open(config_path, "w", encoding="utf-8") as f:
+    with open(
+        config_path,
+        "w",
+        encoding="utf-8"
+    ) as f:
         yaml.safe_dump(
             config,
             f,
             allow_unicode=True,
-            sort_keys=False
+            sort_keys=False,
         )
 
 
-def remaining_time(start_time):
-    remaining = MAX_TOTAL_SECONDS - (time.monotonic() - start_time)
+def run_with_timeout(func, timeout):
+    signal.setitimer(
+        signal.ITIMER_REAL,
+        timeout,
+    )
 
-    if remaining <= 0:
-        raise TestTimeout("Node test exceeded 3 seconds")
+    try:
+        return func()
 
-    return remaining
+    finally:
+        signal.setitimer(
+            signal.ITIMER_REAL,
+            0,
+        )
 
 
-def wait_for_mihomo(start_time):
-    while True:
-        remaining = remaining_time(start_time)
+def proxy_dict():
+    return {
+        "http": (
+            f"http://{PROXY_HOST}:{PROXY_PORT}"
+        ),
+        "https": (
+            f"http://{PROXY_HOST}:{PROXY_PORT}"
+        ),
+    }
+
+
+def wait_for_mihomo():
+    deadline = time.monotonic() + STAGE_TIMEOUT
+
+    while time.monotonic() < deadline:
 
         try:
-            r = requests.get(
+            response = requests.get(
                 "http://www.youtube.com/",
-                proxies={
-                    "http": f"http://{PROXY_HOST}:{PROXY_PORT}",
-                    "https": f"http://{PROXY_HOST}:{PROXY_PORT}",
-                },
-                timeout=min(0.3, remaining),
+                proxies=proxy_dict(),
+                timeout=0.3,
             )
 
-            if r.status_code < 500:
+            if response.status_code < 500:
                 return
 
         except requests.RequestException:
             pass
 
-        time.sleep(min(0.05, remaining))
+        time.sleep(0.05)
+
+    raise StageTimeout(
+        "Mihomo proxy did not become ready"
+    )
 
 
-def run_ytdlp(media_url, start_time):
-    """
-    使用 yt-dlp 获取固定规格的视频媒体 URL。
+def test_youtube_page():
+    start = time.monotonic()
 
-    优先级：
-    1. VP9，1080p 以下
-    2. AVC1，1080p 以下
-    3. 其他视频编码，1080p 以下
+    response = requests.get(
+        "https://www.youtube.com/",
+        proxies=proxy_dict(),
+        timeout=STAGE_TIMEOUT,
+    )
 
-    不选择 4K。
-    """
+    elapsed = time.monotonic() - start
 
-    remaining = remaining_time(start_time)
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"YouTube returned HTTP "
+            f"{response.status_code}"
+        )
 
+    return {
+        "status_code": response.status_code,
+        "elapsed": elapsed,
+        "bytes": len(response.content),
+    }
+
+
+def extract_media_url():
     ytdlp = shutil.which("yt-dlp")
 
     if not ytdlp:
-        raise RuntimeError("yt-dlp executable not found")
+        raise RuntimeError(
+            "yt-dlp executable not found"
+        )
 
+    # 固定在 1080p 以下。
+    #
+    # 优先：
+    #   1. VP9
+    #   2. AVC1
+    #   3. 其他编码
+    #
+    # 不使用 4K，避免节点之间因为格式差异
+    # 导致测速结果不可比较。
     format_selector = (
         "bestvideo[height<=1080][vcodec^=vp9]/"
         "bestvideo[height<=1080][vcodec^=avc1]/"
@@ -138,6 +194,7 @@ def run_ytdlp(media_url, start_time):
 
     command = [
         ytdlp,
+
         "--proxy",
         f"http://{PROXY_HOST}:{PROXY_PORT}",
 
@@ -147,21 +204,25 @@ def run_ytdlp(media_url, start_time):
         "--quiet",
 
         "--socket-timeout",
-        str(max(1, int(remaining))),
+        str(int(STAGE_TIMEOUT)),
 
         "-f",
         format_selector,
 
         "-g",
-        media_url,
+        TEST_VIDEO_URL,
     ]
+
+    start = time.monotonic()
 
     result = subprocess.run(
         command,
         capture_output=True,
         text=True,
-        timeout=max(0.1, remaining),
+        timeout=STAGE_TIMEOUT,
     )
+
+    elapsed = time.monotonic() - start
 
     if result.returncode != 0:
         raise RuntimeError(
@@ -169,100 +230,148 @@ def run_ytdlp(media_url, start_time):
             + result.stderr.strip()[:500]
         )
 
-    media_url = result.stdout.strip().splitlines()
+    urls = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
 
-    if not media_url:
-        raise RuntimeError("yt-dlp returned no media URL")
+    if not urls:
+        raise RuntimeError(
+            "yt-dlp returned no media URL"
+        )
 
-    return media_url[0]
+    return {
+        "url": urls[0],
+        "elapsed": elapsed,
+    }
 
 
-def download_media(media_url, start_time):
-    remaining = remaining_time(start_time)
+def download_media(media_url):
+    start = time.monotonic()
 
-    session = requests.Session()
-
-    response = session.get(
+    response = requests.get(
         media_url,
-        proxies={
-            "http": f"http://{PROXY_HOST}:{PROXY_PORT}",
-            "https": f"http://{PROXY_HOST}:{PROXY_PORT}",
-        },
+        proxies=proxy_dict(),
         stream=True,
-        timeout=(min(1.0, remaining), min(1.0, remaining)),
+        timeout=STAGE_TIMEOUT,
     )
 
     response.raise_for_status()
 
-    ttfb = time.monotonic() - start_time
+    ttfb = time.monotonic() - start
 
     downloaded = 0
+
     download_start = time.monotonic()
 
-    for chunk in response.iter_content(chunk_size=64 * 1024):
-        remaining = remaining_time(start_time)
+    for chunk in response.iter_content(
+        chunk_size=64 * 1024
+    ):
 
         if not chunk:
             continue
 
-        remaining_bytes = MAX_DOWNLOAD_BYTES - downloaded
+        remaining = (
+            MAX_DOWNLOAD_BYTES
+            - downloaded
+        )
 
-        if len(chunk) > remaining_bytes:
-            chunk = chunk[:remaining_bytes]
+        if len(chunk) > remaining:
+            chunk = chunk[:remaining]
 
         downloaded += len(chunk)
 
         if downloaded >= MAX_DOWNLOAD_BYTES:
             break
 
-    download_time = time.monotonic() - download_start
+        if (
+            time.monotonic()
+            - download_start
+            > STAGE_TIMEOUT
+        ):
+            raise StageTimeout(
+                "Media download exceeded "
+                f"{STAGE_TIMEOUT:.1f} seconds"
+            )
+
+    download_time = (
+        time.monotonic()
+        - download_start
+    )
 
     if downloaded < MAX_DOWNLOAD_BYTES:
-        raise RuntimeError(
-            f"Only downloaded {downloaded} bytes before timeout"
+        raise StageTimeout(
+            f"Only downloaded {downloaded:,} "
+            "bytes before timeout"
         )
 
     throughput_mbps = (
-        downloaded * 8 / download_time / 1_000_000
+        downloaded
+        * 8
+        / download_time
+        / 1_000_000
     )
 
     return {
         "downloaded": downloaded,
-        "download_time": download_time,
         "ttfb": ttfb,
+        "download_time": download_time,
         "throughput_mbps": throughput_mbps,
     }
 
 
 def main():
-    print("free-nodes - single YouTube media test")
+
+    print(
+        "free-nodes - single YouTube media test"
+    )
     print()
 
     node = load_first_node()
 
-    print(f"Node name: {node['name']}")
-    print(f"Protocol:  {node.get('type', 'unknown')}")
-    print(f"Maximum total test time: {MAX_TOTAL_SECONDS:.1f} seconds")
+    print(
+        f"Node name: {node['name']}"
+    )
+
+    print(
+        f"Protocol:  "
+        f"{node.get('type', 'unknown')}"
+    )
+
+    print(
+        f"Stage timeout: "
+        f"{STAGE_TIMEOUT:.1f} seconds"
+    )
+
+    print(
+        f"Maximum media download: "
+        f"{MAX_DOWNLOAD_BYTES:,} bytes"
+    )
+
     print()
 
     temp_dir = tempfile.mkdtemp()
 
     config_path = os.path.join(
         temp_dir,
-        "config.yaml"
+        "config.yaml",
     )
 
     build_mihomo_config(
         node,
-        config_path
+        config_path,
     )
 
-    print(f"Temporary config: {config_path}")
+    print(
+        f"Temporary config: {config_path}"
+    )
+
     print("Starting Mihomo...")
 
     process = subprocess.Popen(
         [
-            Mihomo_BIN,
+            MIHOMO_BIN,
             "-d",
             temp_dir,
             "-f",
@@ -272,19 +381,27 @@ def main():
         stderr=subprocess.DEVNULL,
     )
 
-    start_time = time.monotonic()
-
-    signal.signal(
-        signal.SIGALRM,
-        timeout_handler
-    )
-
-    signal.setitimer(
-        signal.ITIMER_REAL,
-        MAX_TOTAL_SECONDS
-    )
+    total_start = time.monotonic()
 
     try:
+
+        # --------------------------------------------------
+        # Mihomo
+        # --------------------------------------------------
+
+        print()
+        print("STEP 0: Mihomo startup")
+
+        run_with_timeout(
+            wait_for_mihomo,
+            STAGE_TIMEOUT,
+        )
+
+        print(
+            "Mihomo proxy is ready: "
+            f"{PROXY_HOST}:{PROXY_PORT}"
+        )
+
         # --------------------------------------------------
         # STEP 1
         # --------------------------------------------------
@@ -292,132 +409,188 @@ def main():
         print()
         print("STEP 1: YouTube page")
 
-        wait_for_mihomo(start_time)
-
-        remaining = remaining_time(start_time)
-
-        response = requests.get(
-            "https://www.youtube.com/",
-            proxies={
-                "http": f"http://{PROXY_HOST}:{PROXY_PORT}",
-                "https": f"http://{PROXY_HOST}:{PROXY_PORT}",
-            },
-            timeout=remaining,
+        page = run_with_timeout(
+            test_youtube_page,
+            STAGE_TIMEOUT,
         )
 
-        page_elapsed = time.monotonic() - start_time
+        print(
+            f"HTTP status: "
+            f"{page['status_code']}"
+        )
 
-        print(f"HTTP status: {response.status_code}")
-        print(f"Page elapsed: {page_elapsed:.3f} seconds")
-        print(f"Page bytes: {len(response.content):,}")
+        print(
+            f"Page elapsed: "
+            f"{page['elapsed']:.3f} seconds"
+        )
 
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"YouTube returned HTTP {response.status_code}"
-            )
+        print(
+            f"Page bytes: "
+            f"{page['bytes']:,}"
+        )
 
-        print("YouTube page test: SUCCESS")
+        print(
+            "YouTube page test: SUCCESS"
+        )
 
         # --------------------------------------------------
         # STEP 2
         # --------------------------------------------------
 
         print()
-        print("STEP 2: yt-dlp media extraction")
-
-        extraction_start = time.monotonic()
-
-        media_url = run_ytdlp(
-            TEST_VIDEO_URL,
-            start_time
+        print(
+            "STEP 2: "
+            "yt-dlp media extraction"
         )
 
-        extraction_elapsed = (
-            time.monotonic() - extraction_start
+        media = run_with_timeout(
+            extract_media_url,
+            STAGE_TIMEOUT,
         )
 
         print(
             f"Extraction elapsed: "
-            f"{extraction_elapsed:.3f} seconds"
+            f"{media['elapsed']:.3f} seconds"
         )
 
-        print("yt-dlp extraction: SUCCESS")
+        print(
+            "yt-dlp extraction: SUCCESS"
+        )
 
         # --------------------------------------------------
         # STEP 3
         # --------------------------------------------------
 
         print()
-        print("STEP 3: Real YouTube media download")
+        print(
+            "STEP 3: "
+            "Real YouTube media download"
+        )
+
         print(
             f"Maximum download: "
             f"{MAX_DOWNLOAD_BYTES:,} bytes"
         )
 
-        result = download_media(
-            media_url,
-            start_time
+        download = run_with_timeout(
+            lambda: download_media(
+                media["url"]
+            ),
+            STAGE_TIMEOUT,
         )
 
         print(
             f"Downloaded: "
-            f"{result['downloaded']:,} bytes"
-        )
-
-        print(
-            f"Download time: "
-            f"{result['download_time']:.3f} seconds"
+            f"{download['downloaded']:,} bytes"
         )
 
         print(
             f"Media TTFB: "
-            f"{result['ttfb']:.3f} seconds"
+            f"{download['ttfb']:.3f} seconds"
+        )
+
+        print(
+            f"Download time: "
+            f"{download['download_time']:.3f} "
+            "seconds"
         )
 
         print(
             f"Throughput: "
-            f"{result['throughput_mbps']:.2f} Mbps"
+            f"{download['throughput_mbps']:.2f} Mbps"
         )
 
-        print("Media download: SUCCESS")
+        print(
+            "Media download: SUCCESS"
+        )
 
         # --------------------------------------------------
         # FINAL
         # --------------------------------------------------
 
-        total_elapsed = time.monotonic() - start_time
+        total_elapsed = (
+            time.monotonic()
+            - total_start
+        )
 
         print()
         print("FINAL RESULT")
-        print(f"Node:             {node['name']}")
-        print(f"Protocol:         {node.get('type', 'unknown')}")
+
+        print(
+            f"Node:             "
+            f"{node['name']}"
+        )
+
+        print(
+            f"Protocol:         "
+            f"{node.get('type', 'unknown')}"
+        )
+
         print(
             f"Total test time:  "
             f"{total_elapsed:.3f}s"
         )
-        print("YouTube page:     SUCCESS")
-        print("yt-dlp:           SUCCESS")
-        print("Media download:   SUCCESS")
+
         print(
-            f"Media TTFB:       "
-            f"{result['ttfb']:.3f}s"
-        )
-        print(
-            f"Media throughput: "
-            f"{result['throughput_mbps']:.2f} Mbps"
+            f"YouTube page:     "
+            f"SUCCESS ({page['elapsed']:.3f}s)"
         )
 
-    except TestTimeout as e:
+        print(
+            f"yt-dlp:           "
+            f"SUCCESS ({media['elapsed']:.3f}s)"
+        )
+
+        print(
+            f"Media download:   "
+            f"SUCCESS"
+        )
+
+        print(
+            f"Media TTFB:       "
+            f"{download['ttfb']:.3f}s"
+        )
+
+        print(
+            f"Media throughput: "
+            f"{download['throughput_mbps']:.2f} Mbps"
+        )
+
+    except subprocess.TimeoutExpired:
 
         print()
         print("FINAL RESULT")
-        print(f"Node:             {node['name']}")
-        print(f"Protocol:         {node.get('type', 'unknown')}")
-        print("Result:            TIMEOUT")
-        print(f"Reason:            {e}")
         print(
-            f"Elapsed:           "
-            f"{time.monotonic() - start_time:.3f}s"
+            f"Node:             "
+            f"{node['name']}"
+        )
+        print(
+            f"Protocol:         "
+            f"{node.get('type', 'unknown')}"
+        )
+        print("Result:            TIMEOUT")
+        print(
+            "Reason:            "
+            "Stage exceeded 3 seconds"
+        )
+
+        sys.exit(1)
+
+    except StageTimeout as e:
+
+        print()
+        print("FINAL RESULT")
+        print(
+            f"Node:             "
+            f"{node['name']}"
+        )
+        print(
+            f"Protocol:         "
+            f"{node.get('type', 'unknown')}"
+        )
+        print("Result:            TIMEOUT")
+        print(
+            f"Reason:            {e}"
         )
 
         sys.exit(1)
@@ -426,23 +599,22 @@ def main():
 
         print()
         print("FINAL RESULT")
-        print(f"Node:             {node['name']}")
-        print(f"Protocol:         {node.get('type', 'unknown')}")
-        print("Result:            FAILED")
-        print(f"Reason:            {e}")
         print(
-            f"Elapsed:           "
-            f"{time.monotonic() - start_time:.3f}s"
+            f"Node:             "
+            f"{node['name']}"
+        )
+        print(
+            f"Protocol:         "
+            f"{node.get('type', 'unknown')}"
+        )
+        print("Result:            FAILED")
+        print(
+            f"Reason:            {e}"
         )
 
         sys.exit(1)
 
     finally:
-
-        signal.setitimer(
-            signal.ITIMER_REAL,
-            0
-        )
 
         process.terminate()
 
@@ -453,7 +625,7 @@ def main():
 
         shutil.rmtree(
             temp_dir,
-            ignore_errors=True
+            ignore_errors=True,
         )
 
 
