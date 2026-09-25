@@ -45,3 +45,9 @@ jobs:
       - name: Test all node
         run: |
           python src/test_nodes.py
+          
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: data/test-results.json 
