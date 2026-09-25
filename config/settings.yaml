@@ -122,4 +122,3 @@ schedule:
   # 等测试流程全部验证成功后，
   # 再在 GitHub Actions 中启用 schedule。
   enabled: false
-```
