@@ -1,3 +1,4 @@
+```python
 import json
 import yaml
 from pathlib import Path
@@ -57,9 +58,7 @@ def get_node_identity(node):
 
         identity[key] = normalize_value(value)
 
-    return tuple(
-        sorted(identity.items())
-    )
+    return tuple(sorted(identity.items()))
 
 
 def load_candidates():
@@ -67,19 +66,15 @@ def load_candidates():
         "r",
         encoding="utf-8"
     ) as f:
-
         data = yaml.safe_load(f)
 
     if isinstance(data, dict):
-        candidates = data.get("proxies", [])
+        return data.get("proxies", [])
 
-    elif isinstance(data, list):
-        candidates = data
+    if isinstance(data, list):
+        return data
 
-    else:
-        candidates = []
-
-    return candidates
+    return []
 
 
 def load_results():
@@ -87,7 +82,6 @@ def load_results():
         "r",
         encoding="utf-8"
     ) as f:
-
         data = json.load(f)
 
     if isinstance(data, dict):
@@ -103,26 +97,19 @@ def main():
 
     if not CANDIDATES_FILE.exists():
         raise FileNotFoundError(
-            f"Candidates file not found: "
-            f"{CANDIDATES_FILE}"
+            f"Candidates file not found: {CANDIDATES_FILE}"
         )
 
     if not RESULTS_FILE.exists():
         raise FileNotFoundError(
-            f"Test results file not found: "
-            f"{RESULTS_FILE}"
+            f"Test results file not found: {RESULTS_FILE}"
         )
 
     candidates = load_candidates()
     results = load_results()
 
-    print(
-        f"Loaded candidates: {len(candidates)}"
-    )
-
-    print(
-        f"Loaded test results: {len(results)}"
-    )
+    print(f"Loaded candidates: {len(candidates)}")
+    print(f"Loaded test results: {len(results)}")
 
     # --------------------------------------------------
     # 建立候选节点索引
@@ -134,7 +121,6 @@ def main():
         candidates,
         start=1
     ):
-
         if isinstance(node, dict):
             candidate_map[index] = node
 
@@ -165,24 +151,18 @@ def main():
         if not isinstance(media, dict):
             continue
 
-        # 必须是完整的 1 MiB 媒体下载
+        # 必须完整下载 1 MiB
         if media.get("status") != "complete":
             continue
 
-        throughput = media.get(
-            "throughput_mbps"
-        )
+        throughput = media.get("throughput_mbps")
 
         if throughput is None:
             continue
 
         try:
             throughput = float(throughput)
-
-        except (
-            TypeError,
-            ValueError
-        ):
+        except (TypeError, ValueError):
             continue
 
         # 最低速度要求
@@ -215,12 +195,11 @@ def main():
 
     # --------------------------------------------------
     # 第三步：
-    # 只取前 100 个
+    # 先取速度最高的前 100 个
     #
     # 注意：
-    # 这里先取 100，再去重。
-    #
-    # 去重后绝对不会从第 101 名补充。
+    # 去重发生在这里之后。
+    # 去重后不再补充第 101 名以后的节点。
     # --------------------------------------------------
 
     top_candidates = qualified[:MAX_NODES]
@@ -230,7 +209,7 @@ def main():
     # 对前 100 个进行核心节点身份去重
     #
     # 因为 top_candidates 已经按照速度降序排列，
-    # 所以同一节点的第一个出现者就是最快变体。
+    # 所以同一核心节点第一个出现的就是最快变体。
     # --------------------------------------------------
 
     selected = []
@@ -238,7 +217,6 @@ def main():
     seen_identities = set()
 
     duplicate_count = 0
-
     duplicate_groups = OrderedDict()
 
     for item in top_candidates:
@@ -264,16 +242,27 @@ def main():
 
     # --------------------------------------------------
     # 第五步：
-    # 输出最终节点
+    # 再次按照速度从高到低排序
+    #
+    # 明确保证最终 YAML 中的节点顺序
+    # 就是实际测速速度降序。
+    # --------------------------------------------------
+
+    selected.sort(
+        key=lambda x: x["throughput_mbps"],
+        reverse=True
+    )
+
+    # --------------------------------------------------
+    # 第六步：
+    # 生成最终 YAML
     # --------------------------------------------------
 
     proxies = []
 
     for item in selected:
 
-        node = dict(
-            item["node"]
-        )
+        node = dict(item["node"])
 
         # 删除内部字段
         node = {
@@ -350,16 +339,12 @@ def main():
         f"{OUTPUT_FILE}"
     )
 
-    # --------------------------------------------------
-    # 重复节点统计
-    # --------------------------------------------------
-
     if duplicate_count > 0:
 
         print()
         print(
-            f"Duplicate groups "
-            f"within top {len(top_candidates)}: "
+            f"Duplicate groups within top "
+            f"{len(top_candidates)}: "
             f"{len(duplicate_groups)}"
         )
 
@@ -401,3 +386,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
