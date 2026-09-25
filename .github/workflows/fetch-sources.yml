@@ -54,6 +54,10 @@ jobs:
         run: |
           python src/analyze_duplicates.py
 
+      - name: Analyze duplicate differences
+        run: |
+          python src/analyze_duplicate_differences.py
+
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
