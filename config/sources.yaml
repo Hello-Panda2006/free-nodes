@@ -7,12 +7,12 @@ sources:
     format: clash
     enabled: true
 
-  #- name: au1rxx
-  #  url: "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml"
-  #  format: clash
-  #  enabled: true
+  - name: au1rxx
+    url: "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml"
+    format: clash
+    enabled: true
 
-  #- name: thordata
-  #  url: "https://thordata.github.io/awesome-free-proxy-list/data/clash/all.yaml"
-  #  format: clash
-  #  enabled: true
+  - name: thordata
+    url: "https://thordata.github.io/awesome-free-proxy-list/data/clash/all.yaml"
+    format: clash
+    enabled: true
