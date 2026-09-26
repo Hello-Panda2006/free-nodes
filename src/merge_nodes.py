@@ -7,18 +7,21 @@ Merge and deduplicate free-node sources.
 1. 读取 config/sources.yaml
 2. 下载所有启用的 YAML 来源
 3. 提取 proxies
-4. 基础清洗
-5. 根据节点配置生成 fingerprint
+4. 进行最低限度的有效性检查
+5. 根据节点实际配置生成 fingerprint
 6. 去除重复节点
 7. 输出 data/candidates.yaml
 8. 输出统计结果
 
-暂时不：
+本阶段不负责：
 - 使用 Mihomo
 - 测试节点
 - 测试 YouTube
+- 测试速度
 - 排名节点
+- 限制节点数量
 - 生成最终 free-nodes.yaml
+- 修改节点连接参数
 """
 
 from __future__ import annotations
@@ -34,9 +37,19 @@ import requests
 import yaml
 
 
+# ============================================================
+# Paths
+# ============================================================
+
 ROOT = Path(__file__).resolve().parents[1]
+
 CONFIG_FILE = ROOT / "config" / "sources.yaml"
 OUTPUT_FILE = ROOT / "data" / "candidates.yaml"
+
+
+# ============================================================
+# HTTP settings
+# ============================================================
 
 USER_AGENT = (
     "Mozilla/5.0 "
@@ -49,8 +62,12 @@ USER_AGENT = (
 REQUEST_TIMEOUT = 30
 
 
+# ============================================================
+# Load source configuration
+# ============================================================
+
 def load_sources() -> list[dict]:
-    """Load source definitions."""
+    """Load source definitions from config/sources.yaml."""
 
     if not CONFIG_FILE.exists():
         raise FileNotFoundError(
@@ -61,7 +78,9 @@ def load_sources() -> list[dict]:
         config = yaml.safe_load(f)
 
     if not isinstance(config, dict):
-        raise ValueError("sources.yaml must contain a YAML mapping.")
+        raise ValueError(
+            "sources.yaml must contain a YAML mapping."
+        )
 
     sources = config.get("sources")
 
@@ -72,6 +91,10 @@ def load_sources() -> list[dict]:
 
     return sources
 
+
+# ============================================================
+# Download YAML source
+# ============================================================
 
 def download_yaml(name: str, url: str) -> dict:
     """Download and parse one YAML source."""
@@ -115,10 +138,14 @@ def download_yaml(name: str, url: str) -> dict:
     return document
 
 
+# ============================================================
+# Normalize values for fingerprint
+# ============================================================
+
 def normalize_value(value: Any) -> Any:
     """
-    Recursively normalize values so that the fingerprint
-    is stable regardless of dictionary ordering.
+    Recursively normalize values so that fingerprinting
+    is independent of dictionary key ordering.
     """
 
     if isinstance(value, dict):
@@ -128,23 +155,38 @@ def normalize_value(value: Any) -> Any:
         }
 
     if isinstance(value, list):
-        return [normalize_value(item) for item in value]
+        return [
+            normalize_value(item)
+            for item in value
+        ]
 
     return value
 
 
+# ============================================================
+# Build node fingerprint
+# ============================================================
+
 def build_fingerprint(proxy: dict) -> str:
     """
-    Build a stable fingerprint from the node configuration.
+    Build a stable fingerprint from the actual node configuration.
 
-    The node name is intentionally excluded because different
-    sources may assign different names to the same node.
+    The following fields do NOT participate in deduplication:
+
+    - name
+    - internal fields beginning with "_"
+
+    Everything else is considered part of the node configuration.
+
+    Important:
+    This function does not modify the original node.
     """
 
     fingerprint_data = {
         key: value
         for key, value in proxy.items()
         if key != "name"
+        and not key.startswith("_")
     }
 
     normalized = normalize_value(fingerprint_data)
@@ -161,37 +203,53 @@ def build_fingerprint(proxy: dict) -> str:
     ).hexdigest()
 
 
-def clean_proxy(proxy: Any) -> dict | None:
-    """Perform basic validation and return a cleaned proxy."""
+# ============================================================
+# Basic proxy validation
+# ============================================================
+
+def validate_proxy(proxy: Any) -> bool:
+    """
+    Perform only the minimum validation required to treat
+    an item as a proxy node.
+
+    No actual node configuration is modified.
+    """
 
     if not isinstance(proxy, dict):
-        return None
+        return False
 
+    # type is required
     proxy_type = proxy.get("type")
 
     if not proxy_type:
-        return None
+        return False
 
     if not isinstance(proxy_type, str):
-        return None
+        return False
 
-    cleaned = dict(proxy)
+    # name is required for later OpenClash/Mihomo use
+    name = proxy.get("name")
 
-    # Normalize protocol name.
-    cleaned["type"] = proxy_type.lower().strip()
+    if not name:
+        return False
 
-    # A proxy should have a name for later OpenClash use.
-    if not cleaned.get("name"):
-        return None
+    if not isinstance(name, str):
+        return False
 
-    if not isinstance(cleaned["name"], str):
-        return None
+    return True
 
-    return cleaned
 
+# ============================================================
+# Save candidates
+# ============================================================
 
 def save_candidates(nodes: list[dict]) -> None:
-    """Save deduplicated candidate nodes."""
+    """
+    Save deduplicated candidate nodes.
+
+    Only internal fields beginning with "_" are removed.
+    Actual node configuration is otherwise preserved.
+    """
 
     OUTPUT_FILE.parent.mkdir(
         parents=True,
@@ -201,8 +259,6 @@ def save_candidates(nodes: list[dict]) -> None:
     output_nodes = []
 
     for proxy in nodes:
-        # Internal metadata is useful during processing but
-        # should not be passed to Mihomo/OpenClash.
         output_proxy = {
             key: value
             for key, value in proxy.items()
@@ -239,13 +295,23 @@ def save_candidates(nodes: list[dict]) -> None:
     )
 
 
+# ============================================================
+# Main
+# ============================================================
+
 def main() -> int:
+
     print("=" * 70)
     print("free-nodes - merge and deduplicate")
     print("=" * 70)
 
+    # --------------------------------------------------------
+    # Load sources
+    # --------------------------------------------------------
+
     try:
         sources = load_sources()
+
     except Exception as exc:
         print(f"ERROR: {exc}")
         return 1
@@ -253,67 +319,111 @@ def main() -> int:
     enabled_sources = [
         source
         for source in sources
-        if source.get("enabled", True)
+        if isinstance(source, dict)
+        and source.get("enabled", True)
     ]
 
     if not enabled_sources:
         print("ERROR: no enabled sources.")
         return 1
 
+    # --------------------------------------------------------
+    # Collect nodes
+    # --------------------------------------------------------
+
     all_nodes: list[dict] = []
 
-    source_counts = {}
-    source_invalid = {}
+    source_counts: dict[str, int] = {}
+    source_invalid: dict[str, int] = {}
 
     for source in enabled_sources:
+
         name = source.get("name", "unknown")
         url = source.get("url")
 
         if not url:
-            print(f"\n[{name}] ERROR: missing URL.")
+            print(
+                f"\n[{name}] ERROR: missing URL."
+            )
             continue
 
         try:
-            document = download_yaml(name, url)
+
+            document = download_yaml(
+                name,
+                url,
+            )
 
             proxies = document.get("proxies")
 
             if not isinstance(proxies, list):
-                print("ERROR: no valid proxies list.")
+                print(
+                    f"ERROR: {name}: "
+                    "no valid proxies list."
+                )
                 continue
 
             valid_count = 0
             invalid_count = 0
 
             for proxy in proxies:
-                cleaned = clean_proxy(proxy)
 
-                if cleaned is None:
+                if not validate_proxy(proxy):
                     invalid_count += 1
                     continue
 
-                cleaned["_source"] = name
+                # ------------------------------------------------
+                # IMPORTANT:
+                # Do not modify the actual node configuration.
+                #
+                # We only make a shallow copy so that internal
+                # processing metadata cannot alter the parsed
+                # source object.
+                # ------------------------------------------------
 
-                all_nodes.append(cleaned)
+                node = dict(proxy)
+
+                # Internal source information.
+                # This is NOT included in fingerprinting.
+                node["_source"] = name
+
+                all_nodes.append(node)
+
                 valid_count += 1
 
             source_counts[name] = valid_count
             source_invalid[name] = invalid_count
 
-            print(f"Valid nodes: {valid_count:,}")
-            print(f"Invalid nodes: {invalid_count:,}")
+            print(
+                f"Valid nodes: {valid_count:,}"
+            )
+
+            print(
+                f"Invalid nodes: {invalid_count:,}"
+            )
 
         except requests.RequestException as exc:
-            print(f"ERROR downloading source: {exc}")
+
+            print(
+                f"ERROR downloading source: {exc}"
+            )
 
         except Exception as exc:
-            print(f"ERROR processing source: {exc}")
+
+            print(
+                f"ERROR processing source: {exc}"
+            )
+
+    # --------------------------------------------------------
+    # Source summary
+    # --------------------------------------------------------
 
     print("\n" + "=" * 70)
     print("SOURCE SUMMARY")
     print("=" * 70)
 
     for name in source_counts:
+
         print(
             f"{name:<16} "
             f"{source_counts[name]:>6,} valid   "
@@ -321,26 +431,33 @@ def main() -> int:
         )
 
     print("-" * 70)
+
     print(
         "Total valid nodes before deduplication: "
         f"{len(all_nodes):,}"
     )
 
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     # Deduplicate
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
 
     unique_nodes: dict[str, dict] = {}
+
     duplicate_count = 0
 
     for proxy in all_nodes:
+
         fingerprint = build_fingerprint(proxy)
 
         if fingerprint in unique_nodes:
+
             duplicate_count += 1
             continue
 
+        # Internal fingerprint is used only during processing.
+        # It will be removed before candidates.yaml is written.
         proxy["_fingerprint"] = fingerprint
+
         unique_nodes[fingerprint] = proxy
 
     nodes = list(unique_nodes.values())
@@ -355,12 +472,12 @@ def main() -> int:
         f"{len(nodes):,}"
     )
 
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     # Protocol statistics
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
 
     protocol_counter = Counter(
-        proxy["type"]
+        proxy.get("type", "unknown")
         for proxy in nodes
     )
 
@@ -370,25 +487,54 @@ def main() -> int:
         protocol_counter.items(),
         key=lambda item: (-item[1], item[0]),
     ):
-        print(f"  {protocol:<16} {count:,}")
 
-    # ------------------------------------------------------------
+        print(
+            f"  {protocol:<16} "
+            f"{count:,}"
+        )
+
+    # --------------------------------------------------------
     # Save candidates
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
 
     save_candidates(nodes)
+
+    # --------------------------------------------------------
+    # Final result
+    # --------------------------------------------------------
 
     print("\n" + "=" * 70)
     print("RESULT")
     print("=" * 70)
-    print(f"Raw valid nodes:          {len(all_nodes):,}")
-    print(f"Duplicates removed:      {duplicate_count:,}")
-    print(f"Unique candidate nodes:  {len(nodes):,}")
-    print(f"Output file:              {OUTPUT_FILE.relative_to(ROOT)}")
+
+    print(
+        f"Raw valid nodes:          "
+        f"{len(all_nodes):,}"
+    )
+
+    print(
+        f"Duplicates removed:      "
+        f"{duplicate_count:,}"
+    )
+
+    print(
+        f"Unique candidate nodes:  "
+        f"{len(nodes):,}"
+    )
+
+    print(
+        f"Output file:              "
+        f"{OUTPUT_FILE.relative_to(ROOT)}"
+    )
+
     print("=" * 70)
 
     return 0
 
+
+# ============================================================
+# Entry point
+# ============================================================
 
 if __name__ == "__main__":
     sys.exit(main())
