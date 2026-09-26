@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 
 """
-Download and inspect free-node YAML sources.
+Download and export free-node YAML sources.
 
 第一阶段只负责：
+
 1. 读取 config/sources.yaml
 2. 下载启用的节点源
 3. 解析 YAML
-4. 检查 proxies
-5. 统计节点数量和协议类型
+4. 提取 proxies
+5. 原样导出节点
 
-暂时不：
-- 使用 Mihomo
-- 测试节点
-- 测试 YouTube
-- 修改节点
-- 生成最终 free-nodes.yaml
+注意：
+- 不清洗节点
+- 不修改节点字段
+- 不修改字段值
+- 不去重
+- 不添加 fingerprint
+- 不添加 source 等内部字段
+- 不测速
+- 不使用 Mihomo
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_FILE = ROOT / "config" / "sources.yaml"
+OUTPUT_DIR = ROOT / "data"
 
 USER_AGENT = (
     "Mozilla/5.0 "
@@ -54,7 +59,9 @@ def load_sources() -> list[dict]:
         config = yaml.safe_load(f)
 
     if not isinstance(config, dict):
-        raise ValueError("sources.yaml must contain a YAML mapping.")
+        raise ValueError(
+            "sources.yaml must contain a YAML mapping."
+        )
 
     sources = config.get("sources")
 
@@ -67,7 +74,7 @@ def load_sources() -> list[dict]:
 
 
 def download_yaml(name: str, url: str) -> bytes:
-    """Download one YAML source."""
+    """Download one YAML source without modifying its content."""
 
     print(f"\n[{name}]")
     print(f"URL: {url}")
@@ -115,30 +122,25 @@ def parse_yaml(data: bytes, name: str) -> dict:
 
 
 def inspect_proxies(document: dict, name: str) -> dict:
-    """Inspect the proxies section without modifying it."""
+    """Inspect proxies without modifying them."""
 
     proxies = document.get("proxies")
 
     if proxies is None:
-        print("ERROR: no 'proxies' section found.")
-        return {
-            "total": 0,
-            "protocols": Counter(),
-            "invalid": 0,
-        }
+        raise ValueError(
+            f"{name}: no 'proxies' section found."
+        )
 
     if not isinstance(proxies, list):
-        print("ERROR: 'proxies' is not a list.")
-        return {
-            "total": 0,
-            "protocols": Counter(),
-            "invalid": 0,
-        }
+        raise ValueError(
+            f"{name}: 'proxies' is not a list."
+        )
 
     protocol_counter = Counter()
     invalid = 0
 
     for proxy in proxies:
+
         if not isinstance(proxy, dict):
             invalid += 1
             continue
@@ -151,34 +153,91 @@ def inspect_proxies(document: dict, name: str) -> dict:
 
         protocol_counter[str(proxy_type).lower()] += 1
 
-    total = len(proxies)
-
-    print(f"Nodes: {total:,}")
+    print(f"Nodes: {len(proxies):,}")
     print(f"Invalid/basic malformed entries: {invalid:,}")
 
     if protocol_counter:
+
         print("Protocols:")
 
         for protocol, count in sorted(
             protocol_counter.items(),
             key=lambda item: (-item[1], item[0]),
         ):
-            print(f"  {protocol:<16} {count:,}")
+            print(
+                f"  {protocol:<16} {count:,}"
+            )
 
     return {
-        "total": total,
+        "total": len(proxies),
         "protocols": protocol_counter,
         "invalid": invalid,
     }
 
 
+def export_proxies(
+    proxies: list,
+    name: str,
+) -> Path:
+    """
+    Export proxies.
+
+    这里唯一做的结构变化是：
+    把源 YAML 中的 proxies 列表重新放进一个
+    'proxies:' 根节点下。
+
+    节点对象本身不进行任何字段修改。
+    """
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    output_file = (
+        OUTPUT_DIR / f"{name}.yaml"
+    )
+
+    document = {
+        "proxies": proxies
+    }
+
+    with output_file.open(
+        "w",
+        encoding="utf-8",
+        newline="\n",
+    ) as f:
+
+        yaml.safe_dump(
+            document,
+            f,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+
+    print(
+        f"Exported: "
+        f"{output_file.relative_to(ROOT)}"
+    )
+
+    print(
+        f"Exported nodes: "
+        f"{len(proxies):,}"
+    )
+
+    return output_file
+
+
 def main() -> int:
+
     print("=" * 70)
-    print("free-nodes - source inspection")
+    print("free-nodes - raw source exporter")
     print("=" * 70)
 
     try:
         sources = load_sources()
+
     except Exception as exc:
         print(f"ERROR: {exc}")
         return 1
@@ -193,35 +252,83 @@ def main() -> int:
         print("ERROR: no enabled sources.")
         return 1
 
-    print(f"Configured sources: {len(enabled_sources)}")
+    print(
+        f"Configured sources: "
+        f"{len(enabled_sources)}"
+    )
 
     results = []
 
     for source in enabled_sources:
-        name = source.get("name", "unknown")
+
+        name = source.get(
+            "name",
+            "unknown",
+        )
+
         url = source.get("url")
 
         if not url:
-            print(f"\n[{name}] ERROR: missing URL.")
+            print(
+                f"\n[{name}] ERROR: missing URL."
+            )
             continue
 
         try:
-            data = download_yaml(name, url)
-            document = parse_yaml(data, name)
-            result = inspect_proxies(document, name)
+
+            data = download_yaml(
+                name,
+                url,
+            )
+
+            document = parse_yaml(
+                data,
+                name,
+            )
+
+            proxies = document.get(
+                "proxies"
+            )
+
+            if not isinstance(
+                proxies,
+                list,
+            ):
+                raise ValueError(
+                    f"{name}: invalid proxies list."
+                )
+
+            result = inspect_proxies(
+                document,
+                name,
+            )
+
+            output_file = export_proxies(
+                proxies,
+                name,
+            )
 
             results.append(
                 {
                     "name": name,
+                    "output": output_file,
                     **result,
                 }
             )
 
         except requests.RequestException as exc:
-            print(f"ERROR downloading source: {exc}")
+
+            print(
+                f"ERROR downloading source: "
+                f"{exc}"
+            )
 
         except Exception as exc:
-            print(f"ERROR processing source: {exc}")
+
+            print(
+                f"ERROR processing source: "
+                f"{exc}"
+            )
 
     print("\n" + "=" * 70)
     print("SUMMARY")
@@ -230,6 +337,7 @@ def main() -> int:
     total_nodes = 0
 
     for result in results:
+
         name = result["name"]
         total = result["total"]
         invalid = result["invalid"]
@@ -239,15 +347,24 @@ def main() -> int:
         print(
             f"{name:<16} "
             f"{total:>6,} nodes   "
-            f"{invalid:>4,} malformed"
+            f"{invalid:>4,} malformed   "
+            f"{result['output'].relative_to(ROOT)}"
         )
 
     print("-" * 70)
-    print(f"Raw nodes across sources: {total_nodes:,}")
+    print(
+        f"Raw nodes exported: "
+        f"{total_nodes:,}"
+    )
+
     print("=" * 70)
 
     if not results:
-        print("ERROR: no source was successfully processed.")
+
+        print(
+            "ERROR: no source was successfully processed."
+        )
+
         return 1
 
     return 0
