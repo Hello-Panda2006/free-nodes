@@ -1,63 +1,11 @@
 import json
 import yaml
 from pathlib import Path
-from collections import OrderedDict
 
 
 CANDIDATES_FILE = Path("data/candidates.yaml")
 RESULTS_FILE = Path("data/test-results.json")
 OUTPUT_FILE = Path("data/free-nodes.yaml")
-
-MIN_SPEED_MBPS = 12.0
-MAX_NODES = 100
-
-
-def normalize_value(value):
-    """
-    将 YAML 中的值转换成稳定、可比较的形式。
-    """
-
-    if isinstance(value, dict):
-        return tuple(
-            sorted(
-                (str(k), normalize_value(v))
-                for k, v in value.items()
-            )
-        )
-
-    if isinstance(value, list):
-        return tuple(
-            normalize_value(v)
-            for v in value
-        )
-
-    return value
-
-
-def get_node_identity(node):
-    """
-    判断两个节点是否属于同一个核心节点。
-
-    不参与身份判断：
-    - name
-    - client-fingerprint
-
-    其他字段全部参与判断。
-    """
-
-    identity = {}
-
-    for key, value in node.items():
-
-        if key == "name":
-            continue
-
-        if key == "client-fingerprint":
-            continue
-
-        identity[key] = normalize_value(value)
-
-    return tuple(sorted(identity.items()))
 
 
 def load_candidates():
@@ -124,11 +72,19 @@ def main():
             candidate_map[index] = node
 
     # --------------------------------------------------
-    # 第一步：
-    # 筛选完整媒体下载，并满足最低速度
+    # 全量转移
+    #
+    # 不限制：
+    # - 最低速度
+    # - 节点数量
+    # - 排名
+    # - 去重
+    #
+    # 只要求：
+    # test-results.json 中存在对应 index
     # --------------------------------------------------
 
-    qualified = []
+    selected = []
 
     for result in results:
 
@@ -145,135 +101,16 @@ def main():
         if not isinstance(node, dict):
             continue
 
-        media = result.get("media")
-
-        if not isinstance(media, dict):
-            continue
-
-        # 必须完整下载 1 MiB
-        if media.get("status") != "complete":
-            continue
-
-        throughput = media.get("throughput_mbps")
-
-        if throughput is None:
-            continue
-
-        try:
-            throughput = float(throughput)
-        except (TypeError, ValueError):
-            continue
-
-        # 最低速度要求
-        if throughput < MIN_SPEED_MBPS:
-            continue
-
-        qualified.append({
-            "index": index,
-            "name": result.get(
-                "name",
-                node.get("name", "")
-            ),
-            "type": result.get(
-                "type",
-                node.get("type", "")
-            ),
-            "throughput_mbps": throughput,
-            "node": node,
-        })
+        selected.append(node)
 
     # --------------------------------------------------
-    # 第二步：
-    # 按实际媒体下载速度从高到低排序
-    # --------------------------------------------------
-
-    qualified.sort(
-        key=lambda x: x["throughput_mbps"],
-        reverse=True
-    )
-
-    # --------------------------------------------------
-    # 第三步：
-    # 先取速度最高的前 100 个
-    #
-    # 注意：
-    # 去重发生在这里之后。
-    # 去重后不再补充第 101 名以后的节点。
-    # --------------------------------------------------
-
-    top_candidates = qualified[:MAX_NODES]
-
-    # --------------------------------------------------
-    # 第四步：
-    # 对前 100 个进行核心节点身份去重
-    #
-    # 因为 top_candidates 已经按照速度降序排列，
-    # 所以同一核心节点第一个出现的就是最快变体。
-    # --------------------------------------------------
-
-    selected = []
-
-    seen_identities = set()
-
-    duplicate_count = 0
-    duplicate_groups = OrderedDict()
-
-    for item in top_candidates:
-
-        node = item["node"]
-
-        identity = get_node_identity(node)
-
-        if identity in seen_identities:
-
-            duplicate_count += 1
-
-            duplicate_groups.setdefault(
-                identity,
-                []
-            ).append(item)
-
-            continue
-
-        seen_identities.add(identity)
-
-        selected.append(item)
-
-    # --------------------------------------------------
-    # 第五步：
-    # 再次按照速度从高到低排序
-    #
-    # 明确保证最终 YAML 中的节点顺序
-    # 就是实际测速速度降序。
-    # --------------------------------------------------
-
-    selected.sort(
-        key=lambda x: x["throughput_mbps"],
-        reverse=True
-    )
-
-    # --------------------------------------------------
-    # 第六步：
     # 生成最终 YAML
+    #
+    # 节点本身不做任何修改
     # --------------------------------------------------
-
-    proxies = []
-
-    for item in selected:
-
-        node = dict(item["node"])
-
-        # 删除内部字段
-        node = {
-            key: value
-            for key, value in node.items()
-            if not str(key).startswith("_")
-        }
-
-        proxies.append(node)
 
     output = {
-        "proxies": proxies
+        "proxies": selected
     }
 
     OUTPUT_FILE.parent.mkdir(
@@ -295,90 +132,29 @@ def main():
         )
 
     # --------------------------------------------------
-    # 输出统计信息
+    # 统计
     # --------------------------------------------------
 
     print()
     print("=" * 70)
-    print("FREE NODE SELECTION")
+    print("FREE NODE EXPORT")
     print("=" * 70)
 
     print(
-        f"Minimum speed:       "
-        f"{MIN_SPEED_MBPS:.1f} Mbps"
+        f"Candidates:          {len(candidates)}"
     )
 
     print(
-        f"Maximum candidates:  "
-        f"{MAX_NODES}"
+        f"Test results:        {len(results)}"
     )
 
     print(
-        f"Qualified nodes:     "
-        f"{len(qualified)}"
+        f"Nodes exported:      {len(selected)}"
     )
 
     print(
-        f"Top candidates:      "
-        f"{len(top_candidates)}"
+        f"Output file:         {OUTPUT_FILE}"
     )
-
-    print(
-        f"Duplicate removed:   "
-        f"{duplicate_count}"
-    )
-
-    print(
-        f"Final selected:      "
-        f"{len(selected)}"
-    )
-
-    print(
-        f"Output file:         "
-        f"{OUTPUT_FILE}"
-    )
-
-    if duplicate_count > 0:
-
-        print()
-        print(
-            f"Duplicate groups within top "
-            f"{len(top_candidates)}: "
-            f"{len(duplicate_groups)}"
-        )
-
-    # --------------------------------------------------
-    # 输出最终节点列表
-    # --------------------------------------------------
-
-    if selected:
-
-        print()
-        print("Top selected nodes:")
-
-        for position, item in enumerate(
-            selected[:20],
-            start=1
-        ):
-
-            print(
-                f"{position:03d}. "
-                f"{item['throughput_mbps']:8.2f} Mbps  "
-                f"{item['type']:12s}  "
-                f"{item['name']}"
-            )
-
-        print()
-
-        print(
-            f"Fastest: "
-            f"{selected[0]['throughput_mbps']:.2f} Mbps"
-        )
-
-        print(
-            f"Slowest selected: "
-            f"{selected[-1]['throughput_mbps']:.2f} Mbps"
-        )
 
     print("=" * 70)
 
