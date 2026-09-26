@@ -52,7 +52,7 @@ jobs:
         run: |
           python src/test_nodes.py
 
-      - name: Select fastest free nodes
+      - name: Select YouTube-passing free nodes
         run: |
           python src/select_nodes.py
 
@@ -83,4 +83,19 @@ jobs:
 
           git diff --cached --quiet || git commit -m "Update free nodes"
 
-          git push            
+          git push
+
+      - name: Keep only the latest 3 workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_IDS=$(gh run list \
+            --workflow="${{ github.workflow }}" \
+            --limit 100 \
+            --json databaseId \
+            --jq '.[3:] | .[].databaseId')
+
+          for RUN_ID in $RUN_IDS; do
+            echo "Deleting workflow run: $RUN_ID"
+            gh run delete "$RUN_ID" --repo "${{ github.repository }}" --confirm
+          done
